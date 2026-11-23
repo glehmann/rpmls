@@ -4,6 +4,7 @@
 //! findings as diagnostics, and serves the editor features built on their
 //! syntax tree.
 
+mod completion;
 mod document;
 mod hover;
 mod links;
@@ -24,15 +25,17 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
-    GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as _,
+    Completion, DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest,
+    FoldingRangeRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
+    Request as _,
 };
 use lsp_types::{
-    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentLinkOptions, DocumentSymbolResponse, FoldingRangeProviderCapability,
-    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, MarkupContent,
-    MarkupKind, OneOf, Position, PublishDiagnosticsParams, RenameOptions, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    CompletionOptions, CompletionResponse, Diagnostic, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentLinkOptions,
+    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, Hover,
+    HoverContents, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position,
+    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
@@ -119,6 +122,10 @@ fn capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec!["%".into(), "{".into()]),
+            ..Default::default()
+        }),
         document_link_provider: Some(DocumentLinkOptions {
             resolve_provider: Some(false),
             work_done_progress_options: Default::default(),
@@ -283,6 +290,19 @@ impl Server {
             }),
             DocumentLinkRequest::METHOD => self.respond::<DocumentLinkRequest>(request, |s, p| {
                 Ok(Some(links::links(s.doc(&p.text_document.uri)?)))
+            }),
+            Completion::METHOD => self.respond::<Completion>(request, |s, p| {
+                let p = p.text_document_position;
+                // rpm's macros, loaded before borrowing the document.
+                if let Err(e) = s.system_macros() {
+                    eprintln!("rpmls: loading rpm's macros: {e:#}");
+                }
+                let system = s.system_macros.as_ref();
+                let doc = s.doc(&p.text_document.uri)?;
+                let items = completion::complete(doc, p.position, s.manual.as_ref(), || {
+                    system.map(SystemMacros::names).unwrap_or_default()
+                });
+                Ok(Some(CompletionResponse::Array(items)))
             }),
             HoverRequest::METHOD => self.respond::<HoverRequest>(request, |s, p| {
                 let p = p.text_document_position_params;

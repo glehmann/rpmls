@@ -94,7 +94,7 @@ fn keys(heading: &str) -> Vec<String> {
 }
 
 /// The manual heading documenting a keyword written in the spec.
-fn manual_key(word: &str) -> String {
+pub fn manual_key(word: &str) -> String {
     let word = word.to_lowercase();
     match word.as_str() {
         "%pre" | "%post" | "%preun" | "%postun" | "%pretrans" | "%posttrans" | "%preuntrans"

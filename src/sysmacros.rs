@@ -33,6 +33,10 @@ impl SystemMacros {
         Ok(Self { index, cache })
     }
 
+    pub fn names(&self) -> Vec<String> {
+        self.index.keys().cloned().collect()
+    }
+
     /// The definitions of `name`, as written in rpm's files, with the files.
     pub fn definition_texts(&self, name: &str) -> Vec<(PathBuf, String)> {
         let Some(defs) = self.index.get(name) else { return Vec::new() };

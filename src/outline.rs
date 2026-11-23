@@ -6,7 +6,7 @@ use tree_sitter::Node;
 use crate::document::Document;
 
 /// The symbol kind of a section node, or `None` when the node is no section.
-fn section_kind(kind: &str) -> Option<SymbolKind> {
+pub fn section_kind(kind: &str) -> Option<SymbolKind> {
     Some(match kind {
         "package" => SymbolKind::PACKAGE,
         "description" => SymbolKind::STRING,
