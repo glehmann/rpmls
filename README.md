@@ -44,6 +44,13 @@ when chosen, has rpm parse the spec.
   - references and highlights, of every way a macro is written: `%name`,
     `%{name}`, `%{?name}`, `%{!?name:…}`, and in conditions;
   - rename, of the macros the spec defines.
+- **Packages**, across the specs of the workspace:
+  - go to definition on a dependency, like `BuildRequires: foo-devel`, to the
+    spec building it: its `Name`, a `%package`, or a `Provides`;
+  - references of a package name, built or required: the specs depending
+    on it.
+
+  Their simple macros are substituted, like `%{name}-libs`.
 - **Completion**, only where each can be written:
   - preamble tags at the start of the lines of the preamble and `%package`
     sections, with the next free `SourceN:` and `PatchN:`, and rpm's

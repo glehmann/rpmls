@@ -12,6 +12,7 @@ mod links;
 mod lint;
 mod macros;
 mod outline;
+mod packages;
 mod sysmacros;
 mod workspace;
 
@@ -36,14 +37,16 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentLinkOptions, DocumentSymbolResponse, ExecuteCommandOptions,
     FoldingRangeProviderCapability, GotoDefinitionResponse, Hover, HoverContents,
-    HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams,
-    RenameOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf, Position,
+    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
 use document::Document;
 use hover::Manual;
 use lint::Job;
+use packages::Packages;
 use sysmacros::SystemMacros;
 use workspace::Workspace;
 
@@ -224,6 +227,8 @@ struct Server {
     /// rpmcrab's explanation of each check, once asked for.
     explanations: HashMap<String, Option<String>>,
     workspace: Workspace,
+    /// The packages of the specs on disk, read once until they change.
+    packages: HashMap<PathBuf, Packages>,
 }
 
 impl Server {
@@ -247,6 +252,7 @@ impl Server {
             diagnostics,
             explanations: HashMap::new(),
             workspace,
+            packages: HashMap::new(),
         })
     }
 
@@ -305,6 +311,45 @@ impl Server {
         }))
     }
 
+    /// The packages of the specs of the workspace: the open documents' text,
+    /// else the specs on disk.
+    fn workspace_packages(&mut self) -> Vec<Packages> {
+        let open: HashMap<PathBuf, &Document> =
+            self.docs.values().filter_map(|d| Some((links::doc_path(d)?, d))).collect();
+        let mut all: Vec<Packages> = open.values().map(|d| Packages::of(d)).collect();
+        for spec in self.workspace.specs() {
+            if open.contains_key(&spec) {
+                continue;
+            }
+            if !self.packages.contains_key(&spec) {
+                let doc = std::fs::read_to_string(&spec).ok().and_then(|text| {
+                    Document::new(&mut self.parser, links::file_uri(&spec)?, 0, text).ok()
+                });
+                let Some(doc) = doc else { continue };
+                self.packages.insert(spec.clone(), Packages::of(&doc));
+            }
+            all.extend(self.packages.get(&spec).cloned());
+        }
+        all
+    }
+
+    /// The locations of the package `name` in the workspace: where it is
+    /// built, and with `required`, where it is depended on.
+    fn package_locations(&mut self, name: &str, built: bool, required: bool) -> Vec<Location> {
+        let mut locations = Vec::new();
+        for packages in self.workspace_packages() {
+            let lists = [(built, &packages.built), (required, &packages.required)];
+            for (_, list) in lists.into_iter().filter(|(wanted, _)| *wanted) {
+                locations.extend(
+                    list.iter()
+                        .filter(|(n, _)| n == name)
+                        .map(|(_, range)| Location::new(packages.uri.clone(), *range)),
+                );
+            }
+        }
+        locations
+    }
+
     fn system_macros(&mut self) -> Result<&SystemMacros> {
         if self.system_macros.is_none() {
             self.system_macros = Some(SystemMacros::load(self.macro_cache.clone())?);
@@ -354,6 +399,7 @@ impl Server {
                         continue;
                     };
                     let deleted = change.typ == lsp_types::FileChangeType::DELETED;
+                    self.packages.remove(&path);
                     specs.extend(self.workspace.affected(&path, deleted, &self.lint_config));
                 }
                 self.jobs.send(Job::Files(specs))?;
@@ -423,9 +469,20 @@ impl Server {
                 let p = p.text_document_position_params;
                 let doc = s.doc(&p.text_document.uri)?;
                 let mut locations = macros::definitions(doc, p.position);
+                let macro_name = macros::name_at(doc, p.position);
+                let dependency = Packages::of(doc)
+                    .at(p.position)
+                    .filter(|(_, required)| *required)
+                    .map(|(name, _)| name.to_string());
+                // A dependency, to the spec building it.
+                if locations.is_empty()
+                    && let Some(name) = dependency
+                {
+                    locations = s.package_locations(&name, true, false);
+                }
                 // A macro the spec does not define comes from rpm's files.
                 if locations.is_empty()
-                    && let Some(name) = macros::name_at(doc, p.position)
+                    && let Some(name) = macro_name
                 {
                     locations = s.system_macros()?.definitions(&name)?;
                 }
@@ -434,7 +491,15 @@ impl Server {
             References::METHOD => self.respond::<References>(request, |s, p| {
                 let doc = s.doc(&p.text_document_position.text_document.uri)?;
                 let position = p.text_document_position.position;
-                Ok(Some(macros::references(doc, position, p.context.include_declaration)))
+                let declaration = p.context.include_declaration;
+                // A package name, but on a macro in it: its dependents in the workspace.
+                if macros::name_at(doc, position).is_none()
+                    && let Some((name, _)) = Packages::of(doc).at(position)
+                {
+                    let name = name.to_string();
+                    return Ok(Some(s.package_locations(&name, declaration, true)));
+                }
+                Ok(Some(macros::references(doc, position, declaration)))
             }),
             DocumentHighlightRequest::METHOD => {
                 self.respond::<DocumentHighlightRequest>(request, |s, p| {
