@@ -335,6 +335,9 @@ impl Server {
                 range = Some(keyword);
             }
         } else if let Some(name) = macros::name_at(doc, position) {
+            if let Some(value) = hints::value(doc, &name) {
+                parts.push(format!("`%{{{name}}}` = `{value}`"));
+            }
             let local = macros::definition_texts(doc, &name);
             let code = |text: &str| format!("```spec\n{text}\n```");
             if local.is_empty() {

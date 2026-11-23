@@ -51,8 +51,9 @@ when chosen, has rpm parse the spec.
   - the linter's explanation of the findings on the line (`--explain`);
   - rpm's manual (`spec.md`) for tags, sections, scriptlets, conditionals and
     `%files` directives;
-  - the definition of a macro, from the spec, or from rpm's macro files, with
-    the file it is in.
+  - the value of a macro, when the spec's simple macros resolve it, like the
+    inlay hints, then its definition, from the spec, or from rpm's macro
+    files, with the file it is in.
 - **Inlay hints**: the values of the spec's simple macros where they are
   used, like `%{version} = 1.2`, when its one-line definitions and tags
   resolve them, without running its code. Helix shows them with

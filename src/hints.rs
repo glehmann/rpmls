@@ -1,4 +1,5 @@
-//! Inlay hints: the values of the spec's simple macros, where they are used.
+//! The values of the spec's simple macros, where they are used: inlay hints,
+//! and on hover.
 
 use lsp_types::{InlayHint, InlayHintLabel, Range};
 
@@ -8,6 +9,13 @@ use crate::macros;
 
 /// The longest value shown.
 const LONGEST: usize = 40;
+
+/// The value of the macro `name`, when the spec's simple macros resolve it,
+/// as document links do, without running its code.
+pub fn value(doc: &Document, name: &str) -> Option<String> {
+    let values = links::macro_values(doc);
+    links::expand(values.get(name)?, &values, 0)
+}
 
 /// The values of the macros used in `range`, `%name`, `%{name}` and
 /// `%{?name}`, after them, when the spec's simple macros resolve them, as
@@ -75,5 +83,7 @@ Requires: %{unknown}
             .collect();
         let h = |line, character, label: &str| (line, character, label.to_string());
         assert_eq!(found, [h(1, 16, "= foo"), h(3, 16, "= foo"), h(3, 25, "= 1.2")]);
+        assert_eq!(value(&d, "name").as_deref(), Some("foo"));
+        assert_eq!(value(&d, "unknown"), None);
     }
 }
