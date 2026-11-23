@@ -55,6 +55,8 @@ when chosen, has rpm parse the spec.
     the file it is in.
 - **Outline**: the sections, with the macros each defines, including those in
   conditionals.
+- **Workspace symbols**, like Helix's `space-S`: the sections, macro
+  definitions and packages of all the specs of the workspace.
 - **Folding**: sections, conditionals, changelog entries, multi-line macro
   definitions and comment blocks.
 - **Macros**:

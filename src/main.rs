@@ -32,6 +32,7 @@ use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
     DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, GotoDefinition, HoverRequest,
     PrepareRenameRequest, References, RegisterCapability, Rename, Request as _,
+    WorkspaceSymbolRequest,
 };
 use lsp_types::{
     CodeActionProviderCapability, CompletionOptions, CompletionResponse, Diagnostic,
@@ -76,6 +77,34 @@ const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
                      directory of its spec: rpmcrab loads it after the
                      rpmlintrc files beside the spec, and the suppressed
                      findings go there";
+
+/// What a spec holds, for the requests on the whole workspace.
+#[derive(Clone)]
+struct Spec {
+    packages: Packages,
+    /// Its sections, macro definitions and packages.
+    symbols: Vec<lsp_types::SymbolInformation>,
+}
+
+impl Spec {
+    fn of(doc: &Document) -> Self {
+        let packages = Packages::of(doc);
+        let container = links::doc_path(doc)
+            .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        let mut symbols = outline::flat_symbols(doc, &container);
+        #[allow(deprecated)]
+        symbols.extend(packages.built.iter().map(|(name, range)| lsp_types::SymbolInformation {
+            name: name.clone(),
+            kind: lsp_types::SymbolKind::PACKAGE,
+            tags: None,
+            deprecated: None,
+            location: Location::new(doc.uri.clone(), *range),
+            container_name: Some(container.clone()),
+        }));
+        Self { packages, symbols }
+    }
+}
 
 /// Publish the diagnostics of a document, of a version, and keep them.
 type Publish = Arc<dyn Fn(Uri, Option<i32>, Vec<Diagnostic>) + Send + Sync>;
@@ -192,6 +221,7 @@ fn capabilities() -> ServerCapabilities {
             TextDocumentSyncKind::INCREMENTAL,
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -234,8 +264,8 @@ struct Server {
     /// rpmcrab's explanation of each check, once asked for.
     explanations: HashMap<String, Option<String>>,
     workspace: Workspace,
-    /// The packages of the specs on disk, read once until they change.
-    packages: HashMap<PathBuf, Packages>,
+    /// What the specs on disk hold, read once until they change.
+    specs: HashMap<PathBuf, Spec>,
     publish: Publish,
 }
 
@@ -261,7 +291,7 @@ impl Server {
             diagnostics,
             explanations: HashMap::new(),
             workspace,
-            packages: HashMap::new(),
+            specs: HashMap::new(),
             publish,
         })
     }
@@ -321,24 +351,24 @@ impl Server {
         }))
     }
 
-    /// The packages of the specs of the workspace: the open documents' text,
-    /// else the specs on disk.
-    fn workspace_packages(&mut self) -> Vec<Packages> {
+    /// What the specs of the workspace hold: the open documents' text, else
+    /// the specs on disk.
+    fn workspace_specs(&mut self) -> Vec<Spec> {
         let open: HashMap<PathBuf, &Document> =
             self.docs.values().filter_map(|d| Some((links::doc_path(d)?, d))).collect();
-        let mut all: Vec<Packages> = open.values().map(|d| Packages::of(d)).collect();
+        let mut all: Vec<Spec> = open.values().map(|d| Spec::of(d)).collect();
         for spec in self.workspace.specs() {
             if open.contains_key(&spec) {
                 continue;
             }
-            if !self.packages.contains_key(&spec) {
+            if !self.specs.contains_key(&spec) {
                 let doc = std::fs::read_to_string(&spec).ok().and_then(|text| {
                     Document::new(&mut self.parser, links::file_uri(&spec)?, 0, text).ok()
                 });
                 let Some(doc) = doc else { continue };
-                self.packages.insert(spec.clone(), Packages::of(&doc));
+                self.specs.insert(spec.clone(), Spec::of(&doc));
             }
-            all.extend(self.packages.get(&spec).cloned());
+            all.extend(self.specs.get(&spec).cloned());
         }
         all
     }
@@ -347,7 +377,7 @@ impl Server {
     /// built, and with `required`, where it is depended on.
     fn package_locations(&mut self, name: &str, built: bool, required: bool) -> Vec<Location> {
         let mut locations = Vec::new();
-        for packages in self.workspace_packages() {
+        for Spec { packages, .. } in self.workspace_specs() {
             let lists = [(built, &packages.built), (required, &packages.required)];
             for (_, list) in lists.into_iter().filter(|(wanted, _)| *wanted) {
                 locations.extend(
@@ -409,7 +439,7 @@ impl Server {
                         continue;
                     };
                     let deleted = change.typ == lsp_types::FileChangeType::DELETED;
-                    self.packages.remove(&path);
+                    self.specs.remove(&path);
                     specs.extend(self.workspace.affected(&path, deleted, &self.lint_config));
                 }
                 self.jobs.send(Job::Files(specs))?;
@@ -473,6 +503,18 @@ impl Server {
                 s.jobs.send(Job::Files(s.workspace.affected(path, false, &s.lint_config)))?;
                 Ok(None)
             }),
+            WorkspaceSymbolRequest::METHOD => {
+                self.respond::<WorkspaceSymbolRequest>(request, |s, p| {
+                    let query = p.query.to_lowercase();
+                    let symbols = s
+                        .workspace_specs()
+                        .into_iter()
+                        .flat_map(|spec| spec.symbols)
+                        .filter(|symbol| symbol.name.to_lowercase().contains(&query))
+                        .collect();
+                    Ok(Some(lsp_types::WorkspaceSymbolResponse::Flat(symbols)))
+                })
+            }
             Completion::METHOD => self.respond::<Completion>(request, |s, p| {
                 let p = p.text_document_position;
                 // rpm's macros, loaded before borrowing the document.

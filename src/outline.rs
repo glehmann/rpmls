@@ -1,6 +1,9 @@
 //! Document symbols (the outline) and folding ranges.
 
-use lsp_types::{DocumentSymbol, FoldingRange, FoldingRangeKind, Position, Range, SymbolKind};
+use lsp_types::{
+    DocumentSymbol, FoldingRange, FoldingRangeKind, Location, Position, Range, SymbolInformation,
+    SymbolKind,
+};
 use tree_sitter::Node;
 
 use crate::document::Document;
@@ -31,6 +34,33 @@ pub fn section_kind(kind: &str) -> Option<SymbolKind> {
 /// outside any section. Conditionals are looked through.
 pub fn symbols(doc: &Document) -> Vec<DocumentSymbol> {
     collect(doc, doc.tree.root_node())
+}
+
+/// The symbols of `doc`, flattened, for the symbols of the workspace, in the
+/// spec `container`.
+pub fn flat_symbols(doc: &Document, container: &str) -> Vec<SymbolInformation> {
+    fn flatten(
+        symbols: Vec<DocumentSymbol>,
+        doc: &Document,
+        container: &str,
+        out: &mut Vec<SymbolInformation>,
+    ) {
+        for symbol in symbols {
+            #[allow(deprecated)]
+            out.push(SymbolInformation {
+                name: symbol.name,
+                kind: symbol.kind,
+                tags: None,
+                deprecated: None,
+                location: Location::new(doc.uri.clone(), symbol.selection_range),
+                container_name: Some(container.to_string()),
+            });
+            flatten(symbol.children.unwrap_or_default(), doc, container, out);
+        }
+    }
+    let mut out = Vec::new();
+    flatten(symbols(doc), doc, container, &mut out);
+    out
 }
 
 fn collect(doc: &Document, node: Node) -> Vec<DocumentSymbol> {
@@ -167,6 +197,17 @@ fn push_comments(ranges: &mut Vec<FoldingRange>, run: Option<(usize, usize)>) {
 mod tests {
     use super::*;
     use crate::document::tests::doc;
+
+    #[test]
+    fn flat_symbols_hold_the_nested_ones() {
+        let d = doc("%global a 1\nName: x\n%package libs\nSummary: s\n%build\n%define b 2\nmake\n");
+        let found: Vec<(String, u32)> = flat_symbols(&d, "x.spec")
+            .into_iter()
+            .map(|s| (s.name, s.location.range.start.line))
+            .collect();
+        let s = |n: &str, l| (n.to_string(), l);
+        assert_eq!(found, [s("%a", 0), s("%package libs", 2), s("%build", 4), s("%b", 5)]);
+    }
 
     const SPEC: &str = "\
 # A comment
