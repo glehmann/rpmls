@@ -117,8 +117,8 @@ language-servers = ["rpmls"]
 cargo build --release
 ```
 
-tree-sitter-rpmspec is a path dependency, `../tree-sitter-rpmspec`: a
-checkout with the fixes of its grammar rpmls relies on.
+tree-sitter-rpmspec comes from [a fork](https://gitlab.com/gleh/tree-sitter-rpmspec/-/tree/rpmls)
+with the fixes of its grammar rpmls relies on.
 
 A static binary, to run in containers of any distribution:
 

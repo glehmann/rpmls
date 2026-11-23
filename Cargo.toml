@@ -13,5 +13,5 @@ lsp-types = "0.97.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tree-sitter = "0.26"
-tree-sitter-rpmspec = { path = "../tree-sitter-rpmspec" }
+tree-sitter-rpmspec = { git = "https://gitlab.com/gleh/tree-sitter-rpmspec.git", rev = "d1c5150af5582813f4f7dc6272c03da7c20892d3" }
 url = "2.5.9"
