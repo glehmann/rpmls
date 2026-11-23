@@ -6,6 +6,7 @@
 
 mod document;
 mod hover;
+mod links;
 mod lint;
 mod macros;
 mod outline;
@@ -23,15 +24,15 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition,
-    HoverRequest, PrepareRenameRequest, References, Rename, Request as _,
+    DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest, FoldingRangeRequest,
+    GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename, Request as _,
 };
 use lsp_types::{
     Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, Hover,
-    HoverContents, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position,
-    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    DocumentLinkOptions, DocumentSymbolResponse, FoldingRangeProviderCapability,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, MarkupContent,
+    MarkupKind, OneOf, Position, PublishDiagnosticsParams, RenameOptions, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
@@ -118,6 +119,10 @@ fn capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        document_link_provider: Some(DocumentLinkOptions {
+            resolve_provider: Some(false),
+            work_done_progress_options: Default::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
@@ -275,6 +280,9 @@ impl Server {
             }
             FoldingRangeRequest::METHOD => self.respond::<FoldingRangeRequest>(request, |s, p| {
                 Ok(Some(outline::folding_ranges(s.doc(&p.text_document.uri)?)))
+            }),
+            DocumentLinkRequest::METHOD => self.respond::<DocumentLinkRequest>(request, |s, p| {
+                Ok(Some(links::links(s.doc(&p.text_document.uri)?)))
             }),
             HoverRequest::METHOD => self.respond::<HoverRequest>(request, |s, p| {
                 let p = p.text_document_position_params;
