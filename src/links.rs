@@ -151,9 +151,12 @@ pub fn expand(text: &str, values: &HashMap<String, String>, depth: usize) -> Opt
     Some(out)
 }
 
+pub fn doc_path(doc: &Document) -> Option<PathBuf> {
+    url::Url::parse(doc.uri.as_str()).ok()?.to_file_path().ok()
+}
+
 pub fn doc_dir(doc: &Document) -> Option<PathBuf> {
-    let path = url::Url::parse(doc.uri.as_str()).ok()?.to_file_path().ok()?;
-    path.parent().map(Path::to_path_buf)
+    doc_path(doc)?.parent().map(Path::to_path_buf)
 }
 
 /// The source or patch file rpm uses for `value`, its basename, next to the

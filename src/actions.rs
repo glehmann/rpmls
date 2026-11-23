@@ -2,7 +2,7 @@
 //! rpmlintrc.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,10 +16,15 @@ use lsp_types::{
 use crate::document::Document;
 use crate::links;
 
-pub fn actions(doc: &Document, diagnostics: &[Diagnostic]) -> Vec<CodeActionOrCommand> {
+/// The actions on `doc`, the findings suppressed in `rpmlintrc` when given.
+pub fn actions(
+    doc: &Document,
+    diagnostics: &[Diagnostic],
+    rpmlintrc: Option<&Path>,
+) -> Vec<CodeActionOrCommand> {
     let mut actions: Vec<CodeActionOrCommand> = diagnostics
         .iter()
-        .filter_map(|d| suppress(doc, d))
+        .filter_map(|d| suppress(doc, d, rpmlintrc))
         .map(CodeActionOrCommand::CodeAction)
         .collect();
     actions.extend(
@@ -109,24 +114,28 @@ fn changelog_date(days: u64) -> String {
     format!("{} {} {day:02} {year}", WEEKDAYS[(days % 7) as usize], MONTHS[month as usize - 1])
 }
 
-/// Suppress an rpmcrab finding with an `addFilter` in the rpmlintrc rpmcrab
-/// loads beside the spec, created when there is none.
-fn suppress(doc: &Document, diagnostic: &Diagnostic) -> Option<CodeAction> {
+/// Suppress an rpmcrab finding with an `addFilter` in `rpmlintrc`, or else in
+/// the rpmlintrc rpmcrab loads beside the spec: `<spec name>.rpmlintrc`,
+/// else the first it loads, created when there is none.
+fn suppress(
+    doc: &Document,
+    diagnostic: &Diagnostic,
+    rpmlintrc: Option<&Path>,
+) -> Option<CodeAction> {
     if diagnostic.source.as_deref() != Some("rpmcrab") {
         return None;
     }
     let Some(NumberOrString::String(check)) = &diagnostic.code else { return None };
-    let dir = links::doc_dir(doc)?;
-    let spec = url::Url::parse(doc.uri.as_str()).ok()?.to_file_path().ok()?;
-    let stem = spec.file_stem()?.to_string_lossy().into_owned();
-    let line = format!("addFilter(\"{}\")\n", regex_escape(check));
-    let (path, existing) = match rpmlintrc(&dir, &stem) {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path).ok()?;
-            (path, Some(text))
-        }
-        None => (dir.join(format!("{stem}.rpmlintrc")), None),
+    let spec = links::doc_path(doc)?;
+    let dir = spec.parent()?;
+    let own = dir.join(format!("{}.rpmlintrc", spec.file_stem()?.to_string_lossy()));
+    let path = match rpmlintrc {
+        Some(path) => path.to_path_buf(),
+        None if own.is_file() => own,
+        None => crate::lint::rpmlintrc_files(dir).into_iter().next().unwrap_or(own),
     };
+    let existing = std::fs::read_to_string(&path).ok();
+    let line = format!("addFilter(\"{}\")\n", regex_escape(check));
     let uri = links::file_uri(&path)?;
     let (at, text) = match &existing {
         Some(text) => {
@@ -168,24 +177,6 @@ fn suppress(doc: &Document, diagnostic: &Diagnostic) -> Option<CodeAction> {
         }),
         ..Default::default()
     })
-}
-
-/// The rpmlintrc to add filters to: `<spec name>.rpmlintrc`, else the first
-/// rpmcrab loads from the spec's directory (`*.rpmlintrc`, `*-rpmlintrc`).
-fn rpmlintrc(dir: &Path, stem: &str) -> Option<PathBuf> {
-    let own = dir.join(format!("{stem}.rpmlintrc"));
-    if own.is_file() {
-        return Some(own);
-    }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file())
-        .collect();
-    files.sort();
-    [".rpmlintrc", "-rpmlintrc"]
-        .iter()
-        .find_map(|suffix| files.iter().find(|p| p.to_string_lossy().ends_with(suffix)).cloned())
 }
 
 /// `addFilter` takes a regular expression.
@@ -245,7 +236,7 @@ mod tests {
             DocumentChanges::Operations(ops) => ops,
             DocumentChanges::Edits(_) => panic!(),
         };
-        let action = suppress(&d, &diagnostic).unwrap();
+        let action = suppress(&d, &diagnostic, None).unwrap();
         assert_eq!(action.title, "Suppress no-%build-section in foo.rpmlintrc");
         let ops = operations(action);
         assert!(matches!(ops[0], DocumentChangeOperation::Op(ResourceOp::Create(_))));
@@ -254,12 +245,19 @@ mod tests {
         assert_eq!(text.new_text, "addFilter(\"no-%build-section\")\n");
 
         std::fs::write(dir.join("foo.rpmlintrc"), "addFilter(\"a\")").unwrap();
-        let ops = operations(suppress(&d, &diagnostic).unwrap());
+        let ops = operations(suppress(&d, &diagnostic, None).unwrap());
         assert_eq!(ops.len(), 1);
         let DocumentChangeOperation::Edit(edit) = &ops[0] else { panic!() };
         let OneOf::Left(text) = &edit.edits[0] else { panic!() };
         assert_eq!(text.range.start, Position::new(0, 14));
         assert_eq!(text.new_text, "\naddFilter(\"no-%build-section\")\n");
+        // In the project's rpmlintrc, when given.
+        let project = dir.join("lint/foo.rpmlintrc");
+        let action = suppress(&d, &diagnostic, Some(&project)).unwrap();
+        assert_eq!(action.title, "Suppress no-%build-section in foo.rpmlintrc");
+        let ops = operations(action);
+        let DocumentChangeOperation::Op(ResourceOp::Create(create)) = &ops[0] else { panic!() };
+        assert_eq!(create.uri, links::file_uri(&project).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(regex_escape("a.b+c"), "a\\.b\\+c");
     }

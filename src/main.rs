@@ -46,6 +46,7 @@ use lint::Job;
 use sysmacros::SystemMacros;
 
 const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
+             [--rpmlint-config PATH]... [--rpmlintrc-dir DIR]
 
   --macro-cache DIR  copy the rpm macro files go-to-definition points at
                      to DIR, at their full path: when rpmls runs in a
@@ -53,12 +54,22 @@ const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
                      the same path, so the editor can open them
   --spec-doc FILE    rpm's spec manual (spec.md) for hover, when it is not
                      installed, as in containers installed without
-                     documentation";
+                     documentation
+  --rpmlint-config PATH
+                     an rpmlint configuration file or directory of them,
+                     for rpmcrab
+  --rpmlintrc-dir DIR
+                     a directory of the filters of each package, as
+                     <package>.rpmlintrc, the package named after the
+                     directory of its spec: rpmcrab loads it after the
+                     rpmlintrc files beside the spec, and the suppressed
+                     findings go there";
 
 #[derive(Default)]
 struct Options {
     macro_cache: Option<PathBuf>,
     spec_doc: Option<PathBuf>,
+    lint: lint::Config,
 }
 
 fn main() -> Result<()> {
@@ -69,6 +80,8 @@ fn main() -> Result<()> {
         match arg.as_str() {
             "--macro-cache" => options.macro_cache = Some(value()?),
             "--spec-doc" => options.spec_doc = Some(value()?),
+            "--rpmlint-config" => options.lint.files.push(value()?),
+            "--rpmlintrc-dir" => options.lint.rpmlintrc_dir = Some(value()?),
             // Passed by some clients for the stdio transport, the only one.
             "--stdio" => {}
             _ => return Err(anyhow!(USAGE)),
@@ -81,8 +94,10 @@ fn main() -> Result<()> {
     let sender = connection.sender.clone();
     let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> = Arc::default();
     let latest = diagnostics.clone();
+    let lint_config = Arc::new(std::mem::take(&mut options.lint));
+    let config = lint_config.clone();
     let linter = thread::spawn(move || {
-        lint::lint_loop(receiver, |uri, version, diagnostics| {
+        lint::lint_loop(receiver, &config, |uri, version, diagnostics| {
             if let Ok(mut latest) = latest.lock() {
                 latest.insert(uri.as_str().to_string(), diagnostics.clone());
             }
@@ -91,7 +106,7 @@ fn main() -> Result<()> {
             let _ = sender.send(notification.into());
         })
     });
-    let mut server = Server::new(jobs, options, diagnostics)?;
+    let mut server = Server::new(jobs, options, lint_config, diagnostics)?;
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -153,6 +168,7 @@ struct Server {
     /// Loaded on the first lookup of a macro the spec does not define.
     system_macros: Option<SystemMacros>,
     manual: Option<Manual>,
+    lint_config: Arc<lint::Config>,
     /// The latest diagnostics of each document, kept by the lint thread.
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     /// rpmcrab's explanation of each check, once asked for.
@@ -163,6 +179,7 @@ impl Server {
     fn new(
         jobs: mpsc::Sender<Job>,
         options: Options,
+        lint_config: Arc<lint::Config>,
         diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     ) -> Result<Self> {
         let mut parser = Parser::new();
@@ -174,6 +191,7 @@ impl Server {
             macro_cache: options.macro_cache,
             system_macros: None,
             manual: Manual::load(options.spec_doc.as_deref()),
+            lint_config,
             diagnostics,
             explanations: HashMap::new(),
         })
@@ -295,7 +313,9 @@ impl Server {
             }),
             CodeActionRequest::METHOD => self.respond::<CodeActionRequest>(request, |s, p| {
                 let doc = s.doc(&p.text_document.uri)?;
-                Ok(Some(actions::actions(doc, &p.context.diagnostics)))
+                let rpmlintrc =
+                    links::doc_path(doc).and_then(|p| s.lint_config.package_rpmlintrc(&p));
+                Ok(Some(actions::actions(doc, &p.context.diagnostics, rpmlintrc.as_deref())))
             }),
             Completion::METHOD => self.respond::<Completion>(request, |s, p| {
                 let p = p.text_document_position;

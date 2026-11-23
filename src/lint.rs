@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
@@ -13,6 +14,56 @@ use serde::Deserialize;
 /// How long the documents must stay unchanged before they are linted.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// rpmcrab's configuration, beyond what it finds on its own.
+#[derive(Default)]
+pub struct Config {
+    /// Configuration files or directories (`-c`).
+    pub files: Vec<PathBuf>,
+    /// A directory of the filters of each package, `<package>.rpmlintrc`,
+    /// the package named after the directory of its spec, loaded after the
+    /// rpmlintrc files beside the spec.
+    pub rpmlintrc_dir: Option<PathBuf>,
+}
+
+impl Config {
+    /// The rpmlintrc of the package of `spec` in the rpmlintrc directory.
+    pub fn package_rpmlintrc(&self, spec: &Path) -> Option<PathBuf> {
+        let package = spec.parent()?.file_name()?.to_string_lossy();
+        Some(self.rpmlintrc_dir.as_ref()?.join(format!("{package}.rpmlintrc")))
+    }
+
+    /// rpmcrab's arguments for `spec`: with a package rpmlintrc, all the
+    /// rpmlintrc files are given, as `-r` stops rpmcrab looking beside the spec.
+    fn args(&self, spec: &Path) -> Vec<PathBuf> {
+        let mut args = Vec::new();
+        for file in &self.files {
+            args.extend([PathBuf::from("-c"), file.clone()]);
+        }
+        if let Some(own) = self.package_rpmlintrc(spec) {
+            let beside = spec.parent().map(rpmlintrc_files).unwrap_or_default();
+            for rc in beside.into_iter().chain(own.is_file().then_some(own)) {
+                args.extend([PathBuf::from("-r"), rc]);
+            }
+        }
+        args
+    }
+}
+
+/// The rpmlintrc files rpmcrab loads from `dir`: `*.rpmlintrc`, then
+/// `*-rpmlintrc`, each sorted.
+pub fn rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.retain(|p| p.is_file());
+    files.sort();
+    [".rpmlintrc", "-rpmlintrc"]
+        .iter()
+        .flat_map(|suffix| files.iter().filter(move |p| p.to_string_lossy().ends_with(suffix)))
+        .cloned()
+        .collect()
+}
+
 /// Work for the lint thread.
 pub enum Job {
     Lint { uri: Uri, version: i32, text: String },
@@ -22,7 +73,11 @@ pub enum Job {
 /// Lint the latest text of each changed document once no change has come in
 /// for [`DEBOUNCE`], until the job channel closes, handing each document's
 /// diagnostics, and its version, to `publish`.
-pub fn lint_loop(jobs: mpsc::Receiver<Job>, publish: impl Fn(Uri, Option<i32>, Vec<Diagnostic>)) {
+pub fn lint_loop(
+    jobs: mpsc::Receiver<Job>,
+    config: &Config,
+    publish: impl Fn(Uri, Option<i32>, Vec<Diagnostic>),
+) {
     // Keyed by the URI's text: `Uri` has interior mutability.
     let mut pending: HashMap<String, (Uri, i32, String)> = HashMap::new();
     loop {
@@ -36,7 +91,7 @@ pub fn lint_loop(jobs: mpsc::Receiver<Job>, publish: impl Fn(Uri, Option<i32>, V
                 Ok(job) => job,
                 Err(RecvTimeoutError::Timeout) => {
                     for (uri, version, text) in pending.drain().map(|(_, v)| v) {
-                        match lint(&uri, &text) {
+                        match lint(&uri, &text, config) {
                             Ok(diagnostics) => publish(uri, Some(version), diagnostics),
                             Err(e) => eprintln!("rpmls: linting {}: {e:#}", uri.as_str()),
                         }
@@ -74,12 +129,15 @@ struct Finding {
 
 /// Lint `text` with rpmcrab as the spec at `uri`. The spec is not parsed by
 /// rpm (`--no-spec-parse`), which would run the shell and Lua code of a
-/// half-typed buffer.
-fn lint(uri: &Uri, text: &str) -> Result<Vec<Diagnostic>> {
+/// half-typed buffer. The filters unused, like those of the binary
+/// packages, are not reported.
+fn lint(uri: &Uri, text: &str, config: &Config) -> Result<Vec<Diagnostic>> {
     let path =
         url::Url::parse(uri.as_str())?.to_file_path().map_err(|()| anyhow!("not a file URI"))?;
     let mut child = Command::new("rpmcrab")
-        .args(["--format", "json", "--no-spec-parse", "--stdin-filename"])
+        .args(["--format", "json", "--no-spec-parse", "--ignore-unused-rpmlintrc"])
+        .args(config.args(&path))
+        .arg("--stdin-filename")
         .arg(&path)
         .arg("-")
         .stdin(Stdio::piped())
@@ -133,4 +191,34 @@ pub fn explain(check: &str) -> Result<String> {
         return Err(anyhow!("rpmcrab has no explanation for {check}"));
     }
     Ok(text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_rpmlintrc_follows_those_beside_the_spec() {
+        let dir = std::env::temp_dir().join(format!("rpmls-lint-{}", std::process::id()));
+        let (pkg, lint) = (dir.join("base/foo"), dir.join("lint"));
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::create_dir_all(&lint).unwrap();
+        for file in [pkg.join("b-rpmlintrc"), pkg.join("a.rpmlintrc"), lint.join("foo.rpmlintrc")] {
+            std::fs::write(file, "").unwrap();
+        }
+        let spec = pkg.join("foo.spec");
+        let config = Config { files: vec!["/c".into()], rpmlintrc_dir: Some(lint.clone()) };
+        let r = |p: &Path| ["-r".into(), p.to_path_buf()];
+        let expected: Vec<PathBuf> = [["-c".into(), "/c".into()], r(&pkg.join("a.rpmlintrc"))]
+            .into_iter()
+            .chain([r(&pkg.join("b-rpmlintrc")), r(&lint.join("foo.rpmlintrc"))])
+            .flatten()
+            .collect();
+        assert_eq!(config.args(&spec), expected);
+        // Without a package rpmlintrc, rpmcrab finds those beside the spec.
+        std::fs::remove_file(lint.join("foo.rpmlintrc")).unwrap();
+        assert_eq!(config.args(&spec).len(), 6);
+        assert_eq!(Config::default().args(&spec), Vec::<PathBuf>::new());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
