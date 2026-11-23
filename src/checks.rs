@@ -1,5 +1,6 @@
-//! rpmls's own checks, on what the linters do not see: the patch files in
-//! the spec's directory, and whether the patches are applied.
+//! rpmls's own checks, on what the linters do not see: the syntax errors,
+//! as the spec is typed, the patch files in the spec's directory, and
+//! whether the patches are applied.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
@@ -11,7 +12,58 @@ use crate::document::Document;
 use crate::links;
 
 pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
-    patches(doc)
+    let mut found = syntax(doc);
+    found.extend(patches(doc));
+    found
+}
+
+pub const SYNTAX: &str = "syntax-error";
+
+/// The syntax errors of the parser, on the first line of the innermost
+/// errors, like an `%if` without `%endif`: warnings, as the parser may be
+/// wrong where rpm is not.
+pub fn syntax(doc: &Document) -> Vec<Diagnostic> {
+    let mut found = Vec::new();
+    if !doc.tree.root_node().has_error() {
+        return found;
+    }
+    let mut cursor = doc.tree.walk();
+    let mut visit = true;
+    loop {
+        let node = cursor.node();
+        if visit && node.is_missing() {
+            let at = doc.range(node.start_byte()..node.start_byte());
+            found.push(warning(at, SYNTAX, &format!("missing {}", node.kind())));
+        } else if visit && node.is_error() && !has_error_inside(node) {
+            let line = node.start_position().row;
+            let text = &doc.text[node.start_byte()..];
+            let first = text.lines().next().unwrap_or_default().trim_end();
+            let at = doc.range(node.start_byte()..node.start_byte() + first.len());
+            let shown: String = first.trim().chars().take(60).collect();
+            let details = if shown.is_empty() {
+                format!("at line {}", line + 1)
+            } else {
+                format!("near `{shown}`")
+            };
+            found.push(warning(at, SYNTAX, &details));
+        }
+        // Into the nodes with errors only.
+        if visit && node.has_error() && cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            visit = true;
+        } else if cursor.goto_parent() {
+            visit = false;
+        } else {
+            return found;
+        }
+    }
+}
+
+fn has_error_inside(node: Node) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(|child| child.has_error())
 }
 
 /// A `Source` or `Patch` tag: its number, its value expanded, if its macros
@@ -232,6 +284,20 @@ fn warning(range: Range, check: &str, details: &str) -> Diagnostic {
 mod tests {
     use super::*;
     use crate::document::tests::parser;
+
+    #[test]
+    fn syntax_errors_are_on_the_first_line_of_the_innermost_errors() {
+        let found = |text: &str| -> Vec<(u32, String)> {
+            let d = crate::document::tests::doc(text);
+            syntax(&d).into_iter().map(|d| (d.range.start.line, d.message)).collect()
+        };
+        assert_eq!(
+            found("Name: x\n%if 0%{?a}\nRequires: y\n%description\nd\n"),
+            [(1, "syntax-error near `%if 0%{?a}`".to_string())]
+        );
+        assert_eq!(found("Name: x\nVersion: %{x\n%description\nd\n")[0].0, 1);
+        assert!(found("Name: x\n%if 1\nRequires: y\n%endif\n").is_empty());
+    }
 
     #[test]
     fn patch_lines_apply_their_numbers() {

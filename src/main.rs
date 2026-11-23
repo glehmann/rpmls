@@ -38,7 +38,7 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentLinkOptions, DocumentSymbolResponse, ExecuteCommandOptions,
     FoldingRangeProviderCapability, GotoDefinitionResponse, Hover, HoverContents,
-    HoverProviderCapability, Location, MarkupContent, MarkupKind, OneOf, Position,
+    HoverProviderCapability, Location, MarkupContent, MarkupKind, NumberOrString, OneOf, Position,
     PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, Uri,
 };
@@ -77,6 +77,9 @@ const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
                      rpmlintrc files beside the spec, and the suppressed
                      findings go there";
 
+/// Publish the diagnostics of a document, of a version, and keep them.
+type Publish = Arc<dyn Fn(Uri, Option<i32>, Vec<Diagnostic>) + Send + Sync>;
+
 #[derive(Default)]
 struct Options {
     macro_cache: Option<PathBuf>,
@@ -114,16 +117,19 @@ fn main() -> Result<()> {
     let sender = connection.sender.clone();
     let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> = Arc::default();
     let latest = diagnostics.clone();
+    let publish: Publish = Arc::new(move |uri, version, diagnostics| {
+        if let Ok(mut latest) = latest.lock() {
+            latest.insert(uri.as_str().to_string(), diagnostics.clone());
+        }
+        let params = PublishDiagnosticsParams { uri, diagnostics, version };
+        let notification = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
+        let _ = sender.send(notification.into());
+    });
     let lint_config = Arc::new(std::mem::take(&mut options.lint));
-    let config = lint_config.clone();
+    let (config, lint_publish) = (lint_config.clone(), publish.clone());
     let linter = thread::spawn(move || {
         lint::lint_loop(receiver, &config, |uri, version, diagnostics| {
-            if let Ok(mut latest) = latest.lock() {
-                latest.insert(uri.as_str().to_string(), diagnostics.clone());
-            }
-            let params = PublishDiagnosticsParams { uri, diagnostics, version };
-            let notification = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
-            let _ = sender.send(notification.into());
+            lint_publish(uri, version, diagnostics)
         })
     });
     // The specs of the workspace, as on disk, for its diagnostics.
@@ -144,7 +150,7 @@ fn main() -> Result<()> {
             .sender
             .send(Request::new(id, RegisterCapability::METHOD.into(), params).into())?;
     }
-    let mut server = Server::new(jobs, options, lint_config, diagnostics, workspace)?;
+    let mut server = Server::new(jobs, options, lint_config, diagnostics, workspace, publish)?;
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -230,6 +236,7 @@ struct Server {
     workspace: Workspace,
     /// The packages of the specs on disk, read once until they change.
     packages: HashMap<PathBuf, Packages>,
+    publish: Publish,
 }
 
 impl Server {
@@ -239,6 +246,7 @@ impl Server {
         lint_config: Arc<lint::Config>,
         diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
         workspace: Workspace,
+        publish: Publish,
     ) -> Result<Self> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into())?;
@@ -254,6 +262,7 @@ impl Server {
             explanations: HashMap::new(),
             workspace,
             packages: HashMap::new(),
+            publish,
         })
     }
 
@@ -410,6 +419,21 @@ impl Server {
         };
         let job = Job::Lint { uri: doc.uri.clone(), version: doc.version, text: doc.text.clone() };
         self.jobs.send(job)?;
+        // The syntax errors at once, with the linter's latest findings, when they change.
+        let syntax = checks::syntax(doc);
+        let latest = self.diagnostics.lock().map_err(|_| anyhow!("the lint thread panicked"))?;
+        let shown = latest.get(doc.uri.as_str());
+        let code = |d: &Diagnostic| d.code == Some(NumberOrString::String(checks::SYNTAX.into()));
+        let shown_syntax: Vec<&Diagnostic> =
+            shown.into_iter().flatten().filter(|d| code(d)).collect();
+        if shown_syntax != syntax.iter().collect::<Vec<_>>() {
+            let mut diagnostics: Vec<Diagnostic> =
+                shown.into_iter().flatten().filter(|d| !code(d)).cloned().collect();
+            diagnostics.extend(syntax);
+            let (uri, version) = (doc.uri.clone(), doc.version);
+            drop(latest);
+            (self.publish)(uri, Some(version), diagnostics);
+        }
         Ok(())
     }
 

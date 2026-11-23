@@ -29,6 +29,9 @@ when chosen, has rpm parse the spec.
     a container, without network nor write access to the project.
   - The rpmlintrc files beside the spec, and the configuration and filters of
     the project, with `--rpmlint-config` and `--rpmlintrc-dir`.
+- **Syntax errors**, as the spec is typed, at once, before the linter: an
+  `%if` without `%endif`, an unclosed `%{`… They are warnings, on the first
+  line of the error, as the parser may be wrong where rpm is not.
 - **Patch checks**, of rpmls itself, on what the linters do not see:
   - `patch-not-found`: a `Patch` tag whose file is neither beside the spec
     nor in `../SOURCES`;
