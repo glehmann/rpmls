@@ -5,6 +5,7 @@
 //! syntax tree.
 
 mod document;
+mod hover;
 mod lint;
 mod macros;
 mod outline;
@@ -12,44 +13,57 @@ mod sysmacros;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use anyhow::{Result, anyhow};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
+    PublishDiagnostics,
 };
 use lsp_types::request::{
     DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition,
-    PrepareRenameRequest, References, Rename, Request as _,
+    HoverRequest, PrepareRenameRequest, References, Rename, Request as _,
 };
 use lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, OneOf,
-    RenameOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, Hover,
+    HoverContents, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position,
+    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
 use document::Document;
+use hover::Manual;
 use lint::Job;
 use sysmacros::SystemMacros;
 
-const USAGE: &str = "usage: rpmls [--macro-cache DIR]
+const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
 
   --macro-cache DIR  copy the rpm macro files go-to-definition points at
                      to DIR, at their full path: when rpmls runs in a
                      container, DIR is a directory shared with the host at
-                     the same path, so the editor can open them";
+                     the same path, so the editor can open them
+  --spec-doc FILE    rpm's spec manual (spec.md) for hover, when it is not
+                     installed, as in containers installed without
+                     documentation";
+
+#[derive(Default)]
+struct Options {
+    macro_cache: Option<PathBuf>,
+    spec_doc: Option<PathBuf>,
+}
 
 fn main() -> Result<()> {
-    let mut macro_cache = None;
+    let mut options = Options::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        let mut value = || args.next().map(PathBuf::from).ok_or_else(|| anyhow!(USAGE));
         match arg.as_str() {
-            "--macro-cache" => {
-                macro_cache = Some(PathBuf::from(args.next().ok_or_else(|| anyhow!(USAGE))?));
-            }
+            "--macro-cache" => options.macro_cache = Some(value()?),
+            "--spec-doc" => options.spec_doc = Some(value()?),
             // Passed by some clients for the stdio transport, the only one.
             "--stdio" => {}
             _ => return Err(anyhow!(USAGE)),
@@ -60,12 +74,19 @@ fn main() -> Result<()> {
 
     let (jobs, receiver) = mpsc::channel();
     let sender = connection.sender.clone();
+    let diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>> = Arc::default();
+    let latest = diagnostics.clone();
     let linter = thread::spawn(move || {
-        lint::lint_loop(receiver, |message| {
-            let _ = sender.send(message);
+        lint::lint_loop(receiver, |uri, version, diagnostics| {
+            if let Ok(mut latest) = latest.lock() {
+                latest.insert(uri.as_str().to_string(), diagnostics.clone());
+            }
+            let params = PublishDiagnosticsParams { uri, diagnostics, version };
+            let notification = Notification::new(PublishDiagnostics::METHOD.to_string(), params);
+            let _ = sender.send(notification.into());
         })
     });
-    let mut server = Server::new(jobs, macro_cache)?;
+    let mut server = Server::new(jobs, options, diagnostics)?;
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -96,6 +117,7 @@ fn capabilities() -> ServerCapabilities {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         document_highlight_provider: Some(OneOf::Left(true)),
@@ -116,13 +138,85 @@ struct Server {
     macro_cache: Option<PathBuf>,
     /// Loaded on the first lookup of a macro the spec does not define.
     system_macros: Option<SystemMacros>,
+    manual: Option<Manual>,
+    /// The latest diagnostics of each document, kept by the lint thread.
+    diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    /// rpmcrab's explanation of each check, once asked for.
+    explanations: HashMap<String, Option<String>>,
 }
 
 impl Server {
-    fn new(jobs: mpsc::Sender<Job>, macro_cache: Option<PathBuf>) -> Result<Self> {
+    fn new(
+        jobs: mpsc::Sender<Job>,
+        options: Options,
+        diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    ) -> Result<Self> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into())?;
-        Ok(Self { docs: HashMap::new(), parser, jobs, macro_cache, system_macros: None })
+        Ok(Self {
+            docs: HashMap::new(),
+            parser,
+            jobs,
+            macro_cache: options.macro_cache,
+            system_macros: None,
+            manual: Manual::load(options.spec_doc.as_deref()),
+            diagnostics,
+            explanations: HashMap::new(),
+        })
+    }
+
+    /// Hover: the explanation of the diagnostics on the line, then the manual
+    /// for the keyword, or the definition of the macro, under the cursor.
+    fn hover(&mut self, uri: &Uri, position: Position) -> Result<Option<Hover>> {
+        let mut codes: Vec<String> = self
+            .diagnostics
+            .lock()
+            .map_err(|_| anyhow!("the lint thread panicked"))?
+            .get(uri.as_str())
+            .into_iter()
+            .flatten()
+            .filter(|d| d.range.start.line <= position.line && position.line <= d.range.end.line)
+            .filter_map(|d| match &d.code {
+                Some(lsp_types::NumberOrString::String(code)) => Some(code.clone()),
+                _ => None,
+            })
+            .collect();
+        codes.sort();
+        codes.dedup();
+        let mut parts = Vec::new();
+        for code in codes {
+            let explanation =
+                self.explanations.entry(code.clone()).or_insert_with(|| lint::explain(&code).ok());
+            if let Some(text) = explanation {
+                parts.push(format!("**{code}** (rpmcrab)\n\n{text}"));
+            }
+        }
+
+        let doc = self.doc(uri)?;
+        let mut range = None;
+        if let Some((key, keyword)) = hover::keyword_at(doc, doc.offset(position)) {
+            if let Some(text) = self.manual.as_ref().and_then(|m| m.get(&key)) {
+                parts.push(text.to_string());
+                range = Some(keyword);
+            }
+        } else if let Some(name) = macros::name_at(doc, position) {
+            let local = macros::definition_texts(doc, &name);
+            let code = |text: &str| format!("```spec\n{text}\n```");
+            if local.is_empty() {
+                for (path, text) in self.system_macros()?.definition_texts(&name) {
+                    parts.push(format!("{}\n\n{}", code(&text), path.display()));
+                }
+            } else {
+                parts.extend(local.iter().map(|text| code(text)));
+            }
+        }
+        Ok((!parts.is_empty()).then(|| Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: parts.join("\n\n---\n\n"),
+            }),
+            range,
+        }))
     }
 
     fn system_macros(&mut self) -> Result<&SystemMacros> {
@@ -181,6 +275,10 @@ impl Server {
             }
             FoldingRangeRequest::METHOD => self.respond::<FoldingRangeRequest>(request, |s, p| {
                 Ok(Some(outline::folding_ranges(s.doc(&p.text_document.uri)?)))
+            }),
+            HoverRequest::METHOD => self.respond::<HoverRequest>(request, |s, p| {
+                let p = p.text_document_position_params;
+                s.hover(&p.text_document.uri, p.position)
             }),
             GotoDefinition::METHOD => self.respond::<GotoDefinition>(request, |s, p| {
                 let p = p.text_document_position_params;

@@ -7,11 +7,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use lsp_server::{Message, Notification};
-use lsp_types::notification::{Notification as _, PublishDiagnostics};
-use lsp_types::{
-    Diagnostic, DiagnosticSeverity, NumberOrString, Position, PublishDiagnosticsParams, Range, Uri,
-};
+use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Uri};
 use serde::Deserialize;
 
 /// How long the documents must stay unchanged before they are linted.
@@ -24,8 +20,9 @@ pub enum Job {
 }
 
 /// Lint the latest text of each changed document once no change has come in
-/// for [`DEBOUNCE`], until the job channel closes.
-pub fn lint_loop(jobs: mpsc::Receiver<Job>, send: impl Fn(Message)) {
+/// for [`DEBOUNCE`], until the job channel closes, handing each document's
+/// diagnostics, and its version, to `publish`.
+pub fn lint_loop(jobs: mpsc::Receiver<Job>, publish: impl Fn(Uri, Option<i32>, Vec<Diagnostic>)) {
     // Keyed by the URI's text: `Uri` has interior mutability.
     let mut pending: HashMap<String, (Uri, i32, String)> = HashMap::new();
     loop {
@@ -40,7 +37,7 @@ pub fn lint_loop(jobs: mpsc::Receiver<Job>, send: impl Fn(Message)) {
                 Err(RecvTimeoutError::Timeout) => {
                     for (uri, version, text) in pending.drain().map(|(_, v)| v) {
                         match lint(&uri, &text) {
-                            Ok(diagnostics) => publish(&send, uri, Some(version), diagnostics),
+                            Ok(diagnostics) => publish(uri, Some(version), diagnostics),
                             Err(e) => eprintln!("rpmls: linting {}: {e:#}", uri.as_str()),
                         }
                     }
@@ -55,15 +52,10 @@ pub fn lint_loop(jobs: mpsc::Receiver<Job>, send: impl Fn(Message)) {
             }
             Job::Close(uri) => {
                 pending.remove(uri.as_str());
-                publish(&send, uri, None, Vec::new());
+                publish(uri, None, Vec::new());
             }
         }
     }
-}
-
-fn publish(send: &impl Fn(Message), uri: Uri, version: Option<i32>, diagnostics: Vec<Diagnostic>) {
-    let params = PublishDiagnosticsParams { uri, diagnostics, version };
-    send(Notification::new(PublishDiagnostics::METHOD.to_string(), params).into());
 }
 
 /// rpmcrab's `--format json` report, reduced to what the diagnostics use.
@@ -128,4 +120,17 @@ fn diagnostic(finding: Finding, lines: &[&str]) -> Diagnostic {
         message,
         ..Default::default()
     }
+}
+
+/// rpmcrab's explanation of a check (`--explain`), without the leading
+/// `check:` line.
+pub fn explain(check: &str) -> Result<String> {
+    let output =
+        Command::new("rpmcrab").args(["--explain", check]).output().context("running rpmcrab")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.split_once('\n').map_or("", |(_, rest)| rest).trim();
+    if text.is_empty() {
+        return Err(anyhow!("rpmcrab has no explanation for {check}"));
+    }
+    Ok(text.to_string())
 }

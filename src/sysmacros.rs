@@ -33,6 +33,17 @@ impl SystemMacros {
         Ok(Self { index, cache })
     }
 
+    /// The definitions of `name`, as written in rpm's files, with the files.
+    pub fn definition_texts(&self, name: &str) -> Vec<(PathBuf, String)> {
+        let Some(defs) = self.index.get(name) else { return Vec::new() };
+        defs.iter()
+            .filter_map(|(path, line)| {
+                let text = fs::read_to_string(path).ok()?;
+                Some((path.clone(), block(&text, *line as usize)))
+            })
+            .collect()
+    }
+
     pub fn definitions(&self, name: &str) -> Result<Vec<Location>> {
         let Some(defs) = self.index.get(name) else { return Ok(Vec::new()) };
         defs.iter()
@@ -103,6 +114,19 @@ fn definitions(text: &str) -> Vec<(String, u32)> {
     found
 }
 
+/// The macro definition starting at 0-based `line`, with its continuation
+/// lines, up to 20 lines.
+pub fn block(text: &str, line: usize) -> String {
+    let mut lines = Vec::new();
+    for l in text.lines().skip(line).take(20) {
+        lines.push(l);
+        if !l.ends_with('\\') {
+            break;
+        }
+    }
+    lines.join("\n")
+}
+
 /// A read-only copy of `path` under `cache`, at its full path, refreshed when
 /// the original changed.
 fn cached_copy(cache: &Path, path: &Path) -> Result<PathBuf> {
@@ -150,6 +174,13 @@ mod tests {
                 ("indented".to_string(), 6),
             ]
         );
+    }
+
+    #[test]
+    fn block_follows_continuations() {
+        let text = "%a 1\n%cmake \\\n  -DX=1 \\\n  -DY=2\n%b 2\n";
+        assert_eq!(block(text, 0), "%a 1");
+        assert_eq!(block(text, 1), "%cmake \\\n  -DX=1 \\\n  -DY=2");
     }
 
     #[test]

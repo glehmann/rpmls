@@ -72,6 +72,15 @@ fn at(doc: &Document, position: Position) -> Option<Occurrence> {
     occurrences(doc).into_iter().find(|o| o.bytes.start <= offset && offset <= o.bytes.end)
 }
 
+/// The definitions of `name` in the document, with their continuation lines.
+pub fn definition_texts(doc: &Document, name: &str) -> Vec<String> {
+    occurrences(doc)
+        .iter()
+        .filter(|o| o.definition && o.name == name)
+        .map(|o| crate::sysmacros::block(&doc.text, doc.position(o.bytes.start).line as usize))
+        .collect()
+}
+
 /// The name of the macro under the cursor, if any.
 pub fn name_at(doc: &Document, position: Position) -> Option<String> {
     at(doc, position).map(|o| o.name)
