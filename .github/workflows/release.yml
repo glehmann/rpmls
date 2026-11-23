@@ -93,8 +93,8 @@ jobs:
         shell: bash
         run: |
           mkdir archive
-          cp $BIN README.md archive/
-          tar czf "$ARCHIVE.tar.gz" -C archive rpmls README.md
+          cp $BIN README.md LICENSE archive/
+          tar czf "$ARCHIVE.tar.gz" -C archive rpmls README.md LICENSE
           shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
           echo "ASSET=$ARCHIVE.tar.gz" >> $GITHUB_ENV
           echo "ASSET_SUM=$ARCHIVE.tar.gz.sha256" >> $GITHUB_ENV
