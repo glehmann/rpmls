@@ -97,23 +97,13 @@ impl Packages {
                     &mut self.required
                 };
                 let Some(parent) = node.parent() else { return };
-                // The names of the values, joined when one starts where the previous ends,
-                // as the parser splits %{name}-%{sub} in two.
-                let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
                 let mut cursor = parent.walk();
                 for value in parent.children_by_field_name("value", &mut cursor) {
                     let mut names = value.walk();
                     let names: Vec<Node> =
                         value.children_by_field_name("name", &mut names).collect();
                     let (Some(first), Some(last)) = (names.first(), names.last()) else { continue };
-                    match spans.last_mut() {
-                        Some(span) if span.end == first.start_byte() => span.end = last.end_byte(),
-                        _ => spans.push(first.start_byte()..last.end_byte()),
-                    }
-                }
-                for mut bytes in spans {
-                    // The parser keeps the comma separating the values in the names.
-                    bytes.end = bytes.start + doc.text[bytes.clone()].trim_end_matches(',').len();
+                    let bytes = first.start_byte()..last.end_byte();
                     if let Some(name) = links::expand(&doc.text[bytes.clone()], values, 0) {
                         list.push((name, doc.range(bytes)));
                     }

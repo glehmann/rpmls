@@ -32,9 +32,7 @@ fn headers(doc: &Document, main: &str, values: &HashMap<String, String>) -> Vec<
             && crate::outline::section_kind(node.kind()).is_some()
             && let Some(name) = node.child_by_field_name("name")
         {
-            // The name of %description starts with the blank before it.
-            let rest = &doc.text[name.start_byte()..];
-            let start = name.start_byte() + rest.len() - rest.trim_start().len();
+            let start = name.start_byte();
             let len = doc.text[start..].find(char::is_whitespace).unwrap_or(doc.text.len() - start);
             let bytes = start..start + len;
             let short = !doc.text[node.start_byte()..start].split_whitespace().any(|w| w == "-n");
