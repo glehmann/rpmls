@@ -206,6 +206,9 @@ pub fn complete(
     if doc.line(position.line as usize).trim_start().starts_with('#') {
         return Vec::new();
     }
+    if let Some(items) = patch_files(doc, position) {
+        return items;
+    }
     let typed = typed(doc, position);
     let section = section_at(doc, position.line as usize);
     let range = doc.range(typed.start..doc.offset(position));
@@ -279,12 +282,46 @@ pub fn complete(
     items
 }
 
+/// After a `Patch` tag, the patch files of the spec's directory it does not
+/// name yet.
+fn patch_files(doc: &Document, position: Position) -> Option<Vec<CompletionItem>> {
+    let line_offset = doc.offset(Position::new(position.line, 0));
+    let before = &doc.line(position.line as usize)[..doc.offset(position) - line_offset];
+    let (tag, value) = before.split_once(':')?;
+    let number = tag.trim_end().to_lowercase().strip_prefix("patch")?.to_string();
+    if !number.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let start = line_offset + before.len() - value.trim_start().len();
+    let range = doc.range(start..doc.offset(position));
+    let dir = crate::links::doc_dir(doc)?;
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter(|n| {
+            (n.ends_with(".patch") || n.ends_with(".diff")) && !doc.text.contains(n.as_str())
+        })
+        .collect();
+    names.sort();
+    Some(
+        names
+            .into_iter()
+            .map(|name| CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FILE),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(range, name))),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
 fn local_macros(doc: &Document) -> Vec<String> {
     macros::occurrences(doc).into_iter().filter(|o| o.definition).map(|o| o.name).collect()
 }
 
 /// The next free numbers of the Source and Patch tags.
-fn next_numbers(doc: &Document) -> [(&'static str, u32); 2] {
+pub fn next_numbers(doc: &Document) -> [(&'static str, u32); 2] {
     let mut next = [("Source", 0), ("Patch", 0)];
     for line in doc.text.lines() {
         for (tag, n) in next.iter_mut() {

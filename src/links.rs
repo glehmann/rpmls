@@ -162,11 +162,18 @@ pub fn doc_dir(doc: &Document) -> Option<PathBuf> {
 /// The source or patch file rpm uses for `value`, its basename, next to the
 /// spec or in the SOURCES directory beside its SPECS directory.
 fn local_file(dir: &Path, value: &str) -> Option<Uri> {
-    let name = value.rsplit('/').next().filter(|n| !n.is_empty())?;
-    [dir.join(name), dir.join("../SOURCES").join(name)]
-        .into_iter()
-        .find(|p| p.is_file())
-        .and_then(|p| file_uri(&p.canonicalize().ok()?))
+    file_uri(&local_path(dir, value)?.canonicalize().ok()?)
+}
+
+/// The local file of the source or patch `value`, by its basename, beside
+/// the spec in `dir` or in the SOURCES directory beside it.
+pub fn local_path(dir: &Path, value: &str) -> Option<PathBuf> {
+    let name = basename(value)?;
+    [dir.join(name), dir.join("../SOURCES").join(name)].into_iter().find(|p| p.is_file())
+}
+
+pub fn basename(value: &str) -> Option<&str> {
+    value.rsplit('/').next().filter(|n| !n.is_empty())
 }
 
 pub fn file_uri(path: &Path) -> Option<Uri> {

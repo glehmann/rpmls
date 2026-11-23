@@ -11,6 +11,8 @@ use anyhow::{Context, Result, anyhow};
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Uri};
 use serde::Deserialize;
 
+use crate::document::Document;
+
 /// How long the documents must stay unchanged before they are linted.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -126,9 +128,19 @@ pub fn lint_loop(
     let mut open: HashMap<String, (Uri, i32, String)> = HashMap::new();
     let mut pending: HashSet<String> = HashSet::new();
     let mut files: VecDeque<PathBuf> = VecDeque::new();
-    let report = |uri: Uri, version, result: Result<Vec<Diagnostic>>| match result {
-        Ok(diagnostics) => publish(uri, version, diagnostics),
-        Err(e) => eprintln!("rpmls: linting {}: {e:#}", uri.as_str()),
+    let mut parser = tree_sitter::Parser::new();
+    if let Err(e) = parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into()) {
+        eprintln!("rpmls: loading the spec grammar: {e}");
+    }
+    // The linter's findings, then rpmls's own.
+    let mut run = |uri: &Uri, version: Option<i32>, text: &str| {
+        let mut diagnostics = lint(uri, text, config).unwrap_or_else(|e| {
+            eprintln!("rpmls: linting {}: {e:#}", uri.as_str());
+            Vec::new()
+        });
+        let doc = Document::new(&mut parser, uri.clone(), version.unwrap_or(0), text.to_string());
+        diagnostics.extend(doc.iter().flat_map(crate::checks::diagnostics));
+        publish(uri.clone(), version, diagnostics);
     };
     loop {
         let job = if !pending.is_empty() {
@@ -136,7 +148,7 @@ pub fn lint_loop(
                 Ok(job) => job,
                 Err(RecvTimeoutError::Timeout) => {
                     for (uri, version, text) in pending.drain().filter_map(|key| open.get(&key)) {
-                        report(uri.clone(), Some(*version), lint(uri, text, config));
+                        run(uri, Some(*version), text);
                     }
                     continue;
                 }
@@ -149,10 +161,10 @@ pub fn lint_loop(
                     files.pop_front();
                     let Some(uri) = crate::links::file_uri(&path) else { continue };
                     if let Some((uri, version, text)) = open.get(uri.as_str()) {
-                        report(uri.clone(), Some(*version), lint(uri, text, config));
+                        run(uri, Some(*version), text);
                     } else {
                         match std::fs::read_to_string(&path) {
-                            Ok(text) => report(uri.clone(), None, lint(&uri, &text, config)),
+                            Ok(text) => run(&uri, None, &text),
                             // Gone, with its findings.
                             Err(_) => publish(uri, None, Vec::new()),
                         }

@@ -5,6 +5,7 @@
 //! syntax tree.
 
 mod actions;
+mod checks;
 mod completion;
 mod document;
 mod hover;

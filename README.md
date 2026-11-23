@@ -29,6 +29,21 @@ when chosen, has rpm parse the spec.
     a container, without network nor write access to the project.
   - The rpmlintrc files beside the spec, and the configuration and filters of
     the project, with `--rpmlint-config` and `--rpmlintrc-dir`.
+- **Patch checks**, of rpmls itself, on what the linters do not see:
+  - `patch-not-found`: a `Patch` tag whose file is neither beside the spec
+    nor in `../SOURCES`;
+  - `patch-not-declared`: a `.patch` or `.diff` file of the spec's directory
+    named neither by the spec nor by the other files there, like the patch
+    lists a spec includes;
+  - `patch-not-applied`: a numbered patch no `%patch`, `%{PATCHn}` or
+    `%{P:n}` applies, unless `%autosetup` or `%autopatch` applies them all.
+
+  Each is skipped when it cannot be sure, like with sources whose macros are
+  not simple.
+
+  A code action declares the patch files not declared, with the next
+  numbers, after the last `Patch` tag, and the patch files not named yet
+  complete after a `Patch` tag.
 - **Hover**:
   - the linter's explanation of the findings on the line (`--explain`);
   - rpm's manual (`spec.md`) for tags, sections, scriptlets, conditionals and

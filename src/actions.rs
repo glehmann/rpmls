@@ -27,10 +27,37 @@ pub fn actions(
         .filter_map(|d| suppress(doc, d, rpmlintrc))
         .map(CodeActionOrCommand::CodeAction)
         .collect();
+    actions.extend(declare_patches(doc).map(CodeActionOrCommand::CodeAction));
     actions.extend(
         changelog_entry(doc, &today(), &packager(doc)).map(CodeActionOrCommand::CodeAction),
     );
     actions
+}
+
+/// Declare the patch files of the spec's directory it does not name, with
+/// the next numbers, after its last patch.
+fn declare_patches(doc: &Document) -> Option<CodeAction> {
+    let (names, Some(line)) = crate::checks::undeclared_patches(doc) else { return None };
+    if names.is_empty() {
+        return None;
+    }
+    let next = crate::completion::next_numbers(doc)[1].1;
+    let text: String =
+        names.iter().zip(next..).map(|(name, n)| format!("Patch{n}: {name}\n")).collect();
+    let at = Position::new(line + 1, 0);
+    let title = match names.len() {
+        1 => format!("Declare {}", names[0]),
+        n => format!("Declare the {n} patch files not declared"),
+    };
+    Some(CodeAction {
+        title,
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit::new(HashMap::from([(
+            doc.uri.clone(),
+            vec![TextEdit::new(Range::new(at, at), text)],
+        )]))),
+        ..Default::default()
+    })
 }
 
 /// Insert a changelog entry for the spec's EVR at the top of `%changelog`,
