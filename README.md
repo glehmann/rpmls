@@ -14,6 +14,13 @@ when chosen, has rpm parse the spec.
 
 - **Diagnostics**: the findings of the linter, 300 ms after the last change,
   on the lines they are about, without saving the spec.
+  - Those of all the specs of the workspace too, as they are on disk, for
+    the workspace diagnostics of the editor, like Helix's `space-D`: up to
+    three directories deep, but in hidden directories and `target`, linted
+    in the background, after the open specs.
+  - Linted again when the editor reports a change of a spec, of an rpmlintrc
+    file, or of the configuration, even out of the editor, like a
+    `git checkout`, when it watches the files, like Helix.
   - rpmcrab, the default, reads the buffer from its stdin, without having rpm
     parse it (`--no-spec-parse`): about 0.06 s a spec.
   - rpmlint (`--linter rpmlint`) lints a copy of the buffer, in a directory

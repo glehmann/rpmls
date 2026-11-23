@@ -1,10 +1,10 @@
 //! Linting with rpmcrab, or rpmlint, on a background thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -104,48 +104,87 @@ pub fn rpmlintrc_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Work for the lint thread.
 pub enum Job {
+    /// The text of an open document, linted once it stops changing.
     Lint { uri: Uri, version: i32, text: String },
+    /// A document closed: its spec is linted as it is on disk again.
     Close(Uri),
+    /// Specs to lint as they are on disk, but those open, of which the text
+    /// is: when nothing else is to lint, as the open documents come first.
+    Files(Vec<PathBuf>),
 }
 
 /// Lint the latest text of each changed document once no change has come in
-/// for [`DEBOUNCE`], until the job channel closes, handing each document's
-/// diagnostics, and its version, to `publish`.
+/// for [`DEBOUNCE`], and the specs on disk in between, until the job channel
+/// closes, handing each document's diagnostics, and its version, to
+/// `publish`.
 pub fn lint_loop(
     jobs: mpsc::Receiver<Job>,
     config: &Config,
     publish: impl Fn(Uri, Option<i32>, Vec<Diagnostic>),
 ) {
     // Keyed by the URI's text: `Uri` has interior mutability.
-    let mut pending: HashMap<String, (Uri, i32, String)> = HashMap::new();
+    let mut open: HashMap<String, (Uri, i32, String)> = HashMap::new();
+    let mut pending: HashSet<String> = HashSet::new();
+    let mut files: VecDeque<PathBuf> = VecDeque::new();
+    let report = |uri: Uri, version, result: Result<Vec<Diagnostic>>| match result {
+        Ok(diagnostics) => publish(uri, version, diagnostics),
+        Err(e) => eprintln!("rpmls: linting {}: {e:#}", uri.as_str()),
+    };
     loop {
-        let job = if pending.is_empty() {
-            match jobs.recv() {
-                Ok(job) => job,
-                Err(_) => return,
-            }
-        } else {
+        let job = if !pending.is_empty() {
             match jobs.recv_timeout(DEBOUNCE) {
                 Ok(job) => job,
                 Err(RecvTimeoutError::Timeout) => {
-                    for (uri, version, text) in pending.drain().map(|(_, v)| v) {
-                        match lint(&uri, &text, config) {
-                            Ok(diagnostics) => publish(uri, Some(version), diagnostics),
-                            Err(e) => eprintln!("rpmls: linting {}: {e:#}", uri.as_str()),
-                        }
+                    for (uri, version, text) in pending.drain().filter_map(|key| open.get(&key)) {
+                        report(uri.clone(), Some(*version), lint(uri, text, config));
                     }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+        } else if let Some(path) = files.front().cloned() {
+            match jobs.try_recv() {
+                Ok(job) => job,
+                Err(TryRecvError::Empty) => {
+                    files.pop_front();
+                    let Some(uri) = crate::links::file_uri(&path) else { continue };
+                    if let Some((uri, version, text)) = open.get(uri.as_str()) {
+                        report(uri.clone(), Some(*version), lint(uri, text, config));
+                    } else {
+                        match std::fs::read_to_string(&path) {
+                            Ok(text) => report(uri.clone(), None, lint(&uri, &text, config)),
+                            // Gone, with its findings.
+                            Err(_) => publish(uri, None, Vec::new()),
+                        }
+                    }
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => return,
+            }
+        } else {
+            match jobs.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
         };
         match job {
             Job::Lint { uri, version, text } => {
-                pending.insert(uri.as_str().to_string(), (uri, version, text));
+                let key = uri.as_str().to_string();
+                pending.insert(key.clone());
+                open.insert(key, (uri, version, text));
             }
             Job::Close(uri) => {
                 pending.remove(uri.as_str());
-                publish(uri, None, Vec::new());
+                open.remove(uri.as_str());
+                let path = url::Url::parse(uri.as_str()).ok().and_then(|u| u.to_file_path().ok());
+                files.extend(path.filter(|p| !files.contains(p)));
+            }
+            Job::Files(paths) => {
+                for path in paths {
+                    if !files.contains(&path) {
+                        files.push_back(path);
+                    }
+                }
             }
         }
     }

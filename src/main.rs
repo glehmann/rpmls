@@ -13,6 +13,7 @@ mod lint;
 mod macros;
 mod outline;
 mod sysmacros;
+mod workspace;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,15 +21,15 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use anyhow::{Result, anyhow};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+    Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
     DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, GotoDefinition, HoverRequest,
-    PrepareRenameRequest, References, Rename, Request as _,
+    PrepareRenameRequest, References, RegisterCapability, Rename, Request as _,
 };
 use lsp_types::{
     CodeActionProviderCapability, CompletionOptions, CompletionResponse, Diagnostic,
@@ -44,6 +45,7 @@ use document::Document;
 use hover::Manual;
 use lint::Job;
 use sysmacros::SystemMacros;
+use workspace::Workspace;
 
 const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
              [--linter rpmcrab|rpmlint] [--rpmlint-config PATH]...
@@ -101,7 +103,8 @@ fn main() -> Result<()> {
         }
     }
     let (connection, io_threads) = Connection::stdio();
-    connection.initialize(serde_json::to_value(capabilities())?)?;
+    let params: lsp_types::InitializeParams =
+        serde_json::from_value(connection.initialize(serde_json::to_value(capabilities())?)?)?;
 
     let (jobs, receiver) = mpsc::channel();
     let sender = connection.sender.clone();
@@ -119,7 +122,25 @@ fn main() -> Result<()> {
             let _ = sender.send(notification.into());
         })
     });
-    let mut server = Server::new(jobs, options, lint_config, diagnostics)?;
+    // The specs of the workspace, as on disk, for its diagnostics.
+    let workspace = Workspace::scan(&roots(&params), &lint_config);
+    jobs.send(Job::Files(workspace.specs()))?;
+    let watch = params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files);
+    if watch.and_then(|w| w.dynamic_registration) == Some(true) {
+        let options =
+            lsp_types::DidChangeWatchedFilesRegistrationOptions { watchers: workspace.watchers() };
+        let registration = lsp_types::Registration {
+            id: "rpmls-watch".into(),
+            method: DidChangeWatchedFiles::METHOD.into(),
+            register_options: Some(serde_json::to_value(options)?),
+        };
+        let params = lsp_types::RegistrationParams { registrations: vec![registration] };
+        let id = RequestId::from("rpmls-watch".to_string());
+        connection
+            .sender
+            .send(Request::new(id, RegisterCapability::METHOD.into(), params).into())?;
+    }
+    let mut server = Server::new(jobs, options, lint_config, diagnostics, workspace)?;
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -141,6 +162,18 @@ fn main() -> Result<()> {
     drop(connection);
     io_threads.join()?;
     Ok(())
+}
+
+/// The directories of the workspace: its folders, or its root.
+fn roots(params: &lsp_types::InitializeParams) -> Vec<PathBuf> {
+    #[allow(deprecated)]
+    let uris: Vec<&Uri> = match &params.workspace_folders {
+        Some(folders) if !folders.is_empty() => folders.iter().map(|f| &f.uri).collect(),
+        _ => params.root_uri.iter().collect(),
+    };
+    uris.into_iter()
+        .filter_map(|uri| url::Url::parse(uri.as_str()).ok()?.to_file_path().ok())
+        .collect()
 }
 
 fn capabilities() -> ServerCapabilities {
@@ -190,6 +223,7 @@ struct Server {
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
     /// rpmcrab's explanation of each check, once asked for.
     explanations: HashMap<String, Option<String>>,
+    workspace: Workspace,
 }
 
 impl Server {
@@ -198,6 +232,7 @@ impl Server {
         options: Options,
         lint_config: Arc<lint::Config>,
         diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+        workspace: Workspace,
     ) -> Result<Self> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into())?;
@@ -211,6 +246,7 @@ impl Server {
             lint_config,
             diagnostics,
             explanations: HashMap::new(),
+            workspace,
         })
     }
 
@@ -287,6 +323,7 @@ impl Server {
                     serde_json::from_value(notification.params)?;
                 let item = params.text_document;
                 let doc = Document::new(&mut self.parser, item.uri, item.version, item.text)?;
+                self.workspace.add(links::doc_path(&doc).unwrap_or_default());
                 self.docs.entry(doc.uri.as_str().to_string()).insert_entry(doc).into_mut()
             }
             DidChangeTextDocument::METHOD => {
@@ -306,6 +343,20 @@ impl Server {
                 let uri = params.text_document.uri;
                 self.docs.remove(uri.as_str());
                 self.jobs.send(Job::Close(uri))?;
+                return Ok(());
+            }
+            DidChangeWatchedFiles::METHOD => {
+                let params: lsp_types::DidChangeWatchedFilesParams =
+                    serde_json::from_value(notification.params)?;
+                let mut specs = Vec::new();
+                for change in params.changes {
+                    let Ok(path) = url::Url::parse(change.uri.as_str())?.to_file_path() else {
+                        continue;
+                    };
+                    let deleted = change.typ == lsp_types::FileChangeType::DELETED;
+                    specs.extend(self.workspace.affected(&path, deleted, &self.lint_config));
+                }
+                self.jobs.send(Job::Files(specs))?;
                 return Ok(());
             }
             _ => return Ok(()),
@@ -345,12 +396,10 @@ impl Server {
                 if p.command != actions::SUPPRESS {
                     return Err(anyhow!("unknown command {}", p.command));
                 }
-                actions::add_filter(std::path::Path::new(path), filter)?;
-                // The findings of all the specs, which the filter may hide.
-                for doc in s.docs.values() {
-                    let (uri, version, text) = (doc.uri.clone(), doc.version, doc.text.clone());
-                    s.jobs.send(Job::Lint { uri, version, text })?;
-                }
+                let path = std::path::Path::new(path);
+                actions::add_filter(path, filter)?;
+                // Without waiting for the editor to report the change, if it does.
+                s.jobs.send(Job::Files(s.workspace.affected(path, false, &s.lint_config)))?;
                 Ok(None)
             }),
             Completion::METHOD => self.respond::<Completion>(request, |s, p| {
