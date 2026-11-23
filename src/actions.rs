@@ -2,14 +2,14 @@
 //! rpmlintrc.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, Result};
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CreateFile, CreateFileOptions, Diagnostic,
-    DocumentChangeOperation, DocumentChanges, NumberOrString, OneOf,
-    OptionalVersionedTextDocumentIdentifier, Position, Range, ResourceOp, TextDocumentEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range,
     TextEdit, WorkspaceEdit,
 };
 
@@ -114,9 +114,14 @@ fn changelog_date(days: u64) -> String {
     format!("{} {} {day:02} {year}", WEEKDAYS[(days % 7) as usize], MONTHS[month as usize - 1])
 }
 
-/// Suppress an rpmcrab finding with an `addFilter` in `rpmlintrc`, or else in
-/// the rpmlintrc rpmcrab loads beside the spec: `<spec name>.rpmlintrc`,
-/// else the first it loads, created when there is none.
+/// The command suppressing a finding, of the rpmlintrc and the filter to
+/// add to it: rpmls writes it, rather than the editor, which would leave it
+/// in a buffer to save, and lints the specs again.
+pub const SUPPRESS: &str = "rpmls.suppress";
+
+/// Suppress a finding with an `addFilter` in `rpmlintrc`, or else in the
+/// rpmlintrc the linter loads beside the spec: `<spec name>.rpmlintrc`, else
+/// the first it loads, created when there is none.
 fn suppress(
     doc: &Document,
     diagnostic: &Diagnostic,
@@ -134,49 +139,28 @@ fn suppress(
         None if own.is_file() => own,
         None => crate::lint::rpmlintrc_files(dir).into_iter().next().unwrap_or(own),
     };
-    let existing = std::fs::read_to_string(&path).ok();
-    let line = format!("addFilter(\"{}\")\n", regex_escape(check));
-    let uri = links::file_uri(&path)?;
-    let (at, text) = match &existing {
-        Some(text) => {
-            let lines = text.lines().count() as u32;
-            match text.lines().last() {
-                Some(last) if !text.ends_with('\n') => (
-                    Position::new(lines - 1, last.encode_utf16().count() as u32),
-                    format!("\n{line}"),
-                ),
-                _ => (Position::new(lines, 0), line),
-            }
-        }
-        None => (Position::new(0, 0), line),
-    };
-    let edit = DocumentChangeOperation::Edit(TextDocumentEdit {
-        text_document: OptionalVersionedTextDocumentIdentifier { uri: uri.clone(), version: None },
-        edits: vec![OneOf::Left(TextEdit::new(Range::new(at, at), text))],
-    });
-    let mut operations = Vec::new();
-    if existing.is_none() {
-        operations.push(DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
-            uri,
-            options: Some(CreateFileOptions {
-                overwrite: Some(false),
-                ignore_if_exists: Some(true),
-            }),
-            annotation_id: None,
-        })));
-    }
-    operations.push(edit);
-    let name = path.file_name()?.to_string_lossy();
+    let title = format!("Suppress {check} in {}", path.file_name()?.to_string_lossy());
+    let filter = format!("addFilter(\"{}\")", regex_escape(check));
+    let arguments = vec![path.to_string_lossy().into(), filter.into()];
     Some(CodeAction {
-        title: format!("Suppress {check} in {name}"),
+        title: title.clone(),
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diagnostic.clone()]),
-        edit: Some(WorkspaceEdit {
-            document_changes: Some(DocumentChanges::Operations(operations)),
-            ..Default::default()
-        }),
+        command: Some(lsp_types::Command::new(title, SUPPRESS.into(), Some(arguments))),
         ..Default::default()
     })
+}
+
+/// Append the line `filter` to the rpmlintrc `path`, created when missing.
+pub fn add_filter(path: &Path, filter: &str) -> Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let separator = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(format!("{separator}{filter}\n").as_bytes()))
+        .with_context(|| format!("adding {filter} to {}", path.display()))
 }
 
 /// `addFilter` takes a regular expression.
@@ -228,36 +212,35 @@ mod tests {
         let uri = links::file_uri(&dir.join("foo.spec")).unwrap();
         let d = Document::new(&mut parser(), uri, 1, "Name: foo\n".into()).unwrap();
         let diagnostic = Diagnostic {
-            source: Some("rpmcrab".into()),
+            source: Some("rpmlint".into()),
             code: Some(NumberOrString::String("no-%build-section".into())),
             ..Default::default()
         };
-        let operations = |action: CodeAction| match action.edit.unwrap().document_changes.unwrap() {
-            DocumentChanges::Operations(ops) => ops,
-            DocumentChanges::Edits(_) => panic!(),
+        let suppress = |rpmlintrc: Option<&Path>| {
+            let action = suppress(&d, &diagnostic, rpmlintrc).unwrap();
+            let command = action.command.unwrap();
+            let args = command.arguments.unwrap();
+            (
+                action.title,
+                args[0].as_str().unwrap().to_string(),
+                args[1].as_str().unwrap().to_string(),
+            )
         };
-        let action = suppress(&d, &diagnostic, None).unwrap();
-        assert_eq!(action.title, "Suppress no-%build-section in foo.rpmlintrc");
-        let ops = operations(action);
-        assert!(matches!(ops[0], DocumentChangeOperation::Op(ResourceOp::Create(_))));
-        let DocumentChangeOperation::Edit(edit) = &ops[1] else { panic!() };
-        let OneOf::Left(text) = &edit.edits[0] else { panic!() };
-        assert_eq!(text.new_text, "addFilter(\"no-%build-section\")\n");
-
-        std::fs::write(dir.join("foo.rpmlintrc"), "addFilter(\"a\")").unwrap();
-        let ops = operations(suppress(&d, &diagnostic, None).unwrap());
-        assert_eq!(ops.len(), 1);
-        let DocumentChangeOperation::Edit(edit) = &ops[0] else { panic!() };
-        let OneOf::Left(text) = &edit.edits[0] else { panic!() };
-        assert_eq!(text.range.start, Position::new(0, 14));
-        assert_eq!(text.new_text, "\naddFilter(\"no-%build-section\")\n");
+        let (title, path, filter) = suppress(None);
+        assert_eq!(title, "Suppress no-%build-section in foo.rpmlintrc");
+        assert_eq!(path, dir.join("foo.rpmlintrc").to_string_lossy());
+        assert_eq!(filter, "addFilter(\"no-%build-section\")");
+        // Created, then appended to, after a last line without its end.
+        add_filter(Path::new(&path), &filter).unwrap();
+        std::fs::write(&path, "addFilter(\"a\")").unwrap();
+        add_filter(Path::new(&path), &filter).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "addFilter(\"a\")\naddFilter(\"no-%build-section\")\n"
+        );
         // In the project's rpmlintrc, when given.
         let project = dir.join("lint/foo.rpmlintrc");
-        let action = suppress(&d, &diagnostic, Some(&project)).unwrap();
-        assert_eq!(action.title, "Suppress no-%build-section in foo.rpmlintrc");
-        let ops = operations(action);
-        let DocumentChangeOperation::Op(ResourceOp::Create(create)) = &ops[0] else { panic!() };
-        assert_eq!(create.uri, links::file_uri(&project).unwrap());
+        assert_eq!(suppress(Some(&project)).1, project.to_string_lossy());
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(regex_escape("a.b+c"), "a\\.b\\+c");
     }

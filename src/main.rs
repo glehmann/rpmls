@@ -27,16 +27,16 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
-    DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
-    References, Rename, Request as _,
+    DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, GotoDefinition, HoverRequest,
+    PrepareRenameRequest, References, Rename, Request as _,
 };
 use lsp_types::{
     CodeActionProviderCapability, CompletionOptions, CompletionResponse, Diagnostic,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentLinkOptions, DocumentSymbolResponse, FoldingRangeProviderCapability,
-    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, MarkupContent,
-    MarkupKind, OneOf, Position, PublishDiagnosticsParams, RenameOptions, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DocumentLinkOptions, DocumentSymbolResponse, ExecuteCommandOptions,
+    FoldingRangeProviderCapability, GotoDefinitionResponse, Hover, HoverContents,
+    HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position, PublishDiagnosticsParams,
+    RenameOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
@@ -152,6 +152,10 @@ fn capabilities() -> ServerCapabilities {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![actions::SUPPRESS.into()],
+            ..Default::default()
+        }),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec!["%".into(), "{".into()]),
             ..Default::default()
@@ -330,6 +334,24 @@ impl Server {
                 let rpmlintrc =
                     links::doc_path(doc).and_then(|p| s.lint_config.package_rpmlintrc(&p));
                 Ok(Some(actions::actions(doc, &p.context.diagnostics, rpmlintrc.as_deref())))
+            }),
+            ExecuteCommand::METHOD => self.respond::<ExecuteCommand>(request, |s, p| {
+                let [path, filter] = p.arguments.as_slice() else {
+                    return Err(anyhow!("{} takes a path and a filter", p.command));
+                };
+                let (Some(path), Some(filter)) = (path.as_str(), filter.as_str()) else {
+                    return Err(anyhow!("{} takes a path and a filter", p.command));
+                };
+                if p.command != actions::SUPPRESS {
+                    return Err(anyhow!("unknown command {}", p.command));
+                }
+                actions::add_filter(std::path::Path::new(path), filter)?;
+                // The findings of all the specs, which the filter may hide.
+                for doc in s.docs.values() {
+                    let (uri, version, text) = (doc.uri.clone(), doc.version, doc.text.clone());
+                    s.jobs.send(Job::Lint { uri, version, text })?;
+                }
+                Ok(None)
             }),
             Completion::METHOD => self.respond::<Completion>(request, |s, p| {
                 let p = p.text_document_position;

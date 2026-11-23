@@ -56,7 +56,9 @@ when chosen, has rpm parse the spec.
   target with another macro gets no link.
 - **Code actions**:
   - suppress a finding, with an `addFilter` in the rpmlintrc the linter loads
-    for the spec, created when there is none;
+    for the spec, created when there is none: rpmls writes it, rather than
+    the editor, which would leave it in a buffer to save, and lints the open
+    specs again;
   - add a changelog entry at the top of `%changelog`, with today's date, rpm's
     `%packager`, or else git's user, and the spec's `[epoch:]version-release`
     when its simple macros resolve it; none with `%autochangelog`.
