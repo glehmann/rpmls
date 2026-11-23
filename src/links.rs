@@ -74,7 +74,7 @@ fn link_value<'t>(doc: &Document, node: Node<'t>) -> Option<(Node<'t>, bool)> {
 
 /// The spec's simple macros: one-line `%define`/`%global` values and the tag
 /// values rpm makes macros of.
-fn macro_values(doc: &Document) -> HashMap<String, String> {
+pub fn macro_values(doc: &Document) -> HashMap<String, String> {
     let mut values = HashMap::new();
     for occurrence in macros::occurrences(doc).into_iter().filter(|o| o.definition) {
         let node = doc
@@ -107,7 +107,7 @@ fn macro_values(doc: &Document) -> HashMap<String, String> {
 
 /// `text` with its macros substituted, or `None` when one is unknown or too
 /// complex: `%%`, `%name`, `%{name}`, and `%{?name}` (empty when undefined).
-fn expand(text: &str, values: &HashMap<String, String>, depth: usize) -> Option<String> {
+pub fn expand(text: &str, values: &HashMap<String, String>, depth: usize) -> Option<String> {
     if depth > 10 {
         return None;
     }
@@ -151,7 +151,7 @@ fn expand(text: &str, values: &HashMap<String, String>, depth: usize) -> Option<
     Some(out)
 }
 
-fn doc_dir(doc: &Document) -> Option<PathBuf> {
+pub fn doc_dir(doc: &Document) -> Option<PathBuf> {
     let path = url::Url::parse(doc.uri.as_str()).ok()?.to_file_path().ok()?;
     path.parent().map(Path::to_path_buf)
 }
@@ -166,7 +166,7 @@ fn local_file(dir: &Path, value: &str) -> Option<Uri> {
         .and_then(|p| file_uri(&p.canonicalize().ok()?))
 }
 
-fn file_uri(path: &Path) -> Option<Uri> {
+pub fn file_uri(path: &Path) -> Option<Uri> {
     url::Url::from_file_path(path).ok()?.as_str().parse().ok()
 }
 

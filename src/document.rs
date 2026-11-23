@@ -66,6 +66,10 @@ impl Document {
         self.text[start..end].trim_end_matches(['\n', '\r'])
     }
 
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
     /// The byte offset of an LSP position, clamped to the line and the text.
     pub fn offset(&self, position: Position) -> usize {
         let line = position.line as usize;

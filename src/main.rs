@@ -4,6 +4,7 @@
 //! findings as diagnostics, and serves the editor features built on their
 //! syntax tree.
 
+mod actions;
 mod completion;
 mod document;
 mod hover;
@@ -25,17 +26,17 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentHighlightRequest, DocumentLinkRequest, DocumentSymbolRequest,
-    FoldingRangeRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
-    Request as _,
+    CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
+    DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
+    References, Rename, Request as _,
 };
 use lsp_types::{
-    CompletionOptions, CompletionResponse, Diagnostic, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentLinkOptions,
-    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, Hover,
-    HoverContents, HoverProviderCapability, MarkupContent, MarkupKind, OneOf, Position,
-    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    CodeActionProviderCapability, CompletionOptions, CompletionResponse, Diagnostic,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentLinkOptions, DocumentSymbolResponse, FoldingRangeProviderCapability,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, MarkupContent,
+    MarkupKind, OneOf, Position, PublishDiagnosticsParams, RenameOptions, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
@@ -122,6 +123,7 @@ fn capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec!["%".into(), "{".into()]),
             ..Default::default()
@@ -290,6 +292,10 @@ impl Server {
             }),
             DocumentLinkRequest::METHOD => self.respond::<DocumentLinkRequest>(request, |s, p| {
                 Ok(Some(links::links(s.doc(&p.text_document.uri)?)))
+            }),
+            CodeActionRequest::METHOD => self.respond::<CodeActionRequest>(request, |s, p| {
+                let doc = s.doc(&p.text_document.uri)?;
+                Ok(Some(actions::actions(doc, &p.context.diagnostics)))
             }),
             Completion::METHOD => self.respond::<Completion>(request, |s, p| {
                 let p = p.text_document_position;
