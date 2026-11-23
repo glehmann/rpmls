@@ -122,7 +122,7 @@ fn suppress(
     diagnostic: &Diagnostic,
     rpmlintrc: Option<&Path>,
 ) -> Option<CodeAction> {
-    if diagnostic.source.as_deref() != Some("rpmcrab") {
+    if !matches!(diagnostic.source.as_deref(), Some("rpmcrab" | "rpmlint")) {
         return None;
     }
     let Some(NumberOrString::String(check)) = &diagnostic.code else { return None };

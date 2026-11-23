@@ -1,7 +1,7 @@
 //! rpmls: a language server for RPM spec files.
 //!
-//! Lints the open specs with rpmcrab as they are edited, publishing its
-//! findings as diagnostics, and serves the editor features built on their
+//! Lints the open specs with rpmcrab, or rpmlint, as they are edited,
+//! publishing their findings as diagnostics, and serves the editor features built on their
 //! syntax tree.
 
 mod actions;
@@ -46,7 +46,8 @@ use lint::Job;
 use sysmacros::SystemMacros;
 
 const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
-             [--rpmlint-config PATH]... [--rpmlintrc-dir DIR]
+             [--linter rpmcrab|rpmlint] [--rpmlint-config PATH]...
+             [--rpmlintrc-dir DIR]
 
   --macro-cache DIR  copy the rpm macro files go-to-definition points at
                      to DIR, at their full path: when rpmls runs in a
@@ -55,6 +56,11 @@ const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
   --spec-doc FILE    rpm's spec manual (spec.md) for hover, when it is not
                      installed, as in containers installed without
                      documentation
+  --linter rpmcrab|rpmlint
+                     the linter, rpmcrab by default; rpmlint has rpm parse
+                     the spec, which runs its shell and Lua code as it is
+                     typed: in a container only, without network nor write
+                     access to the project
   --rpmlint-config PATH
                      an rpmlint configuration file or directory of them,
                      for rpmcrab
@@ -80,6 +86,13 @@ fn main() -> Result<()> {
         match arg.as_str() {
             "--macro-cache" => options.macro_cache = Some(value()?),
             "--spec-doc" => options.spec_doc = Some(value()?),
+            "--linter" => {
+                options.lint.linter = match value()?.to_str() {
+                    Some("rpmcrab") => lint::Linter::Rpmcrab,
+                    Some("rpmlint") => lint::Linter::Rpmlint,
+                    _ => return Err(anyhow!(USAGE)),
+                }
+            }
             "--rpmlint-config" => options.lint.files.push(value()?),
             "--rpmlintrc-dir" => options.lint.rpmlintrc_dir = Some(value()?),
             // Passed by some clients for the stdio transport, the only one.
@@ -216,11 +229,12 @@ impl Server {
         codes.sort();
         codes.dedup();
         let mut parts = Vec::new();
+        let config = self.lint_config.clone();
         for code in codes {
             let explanation =
-                self.explanations.entry(code.clone()).or_insert_with(|| lint::explain(&code).ok());
+                self.explanations.entry(code.clone()).or_insert_with(|| config.explain(&code).ok());
             if let Some(text) = explanation {
-                parts.push(format!("**{code}** (rpmcrab)\n\n{text}"));
+                parts.push(format!("**{code}** ({})\n\n{text}", config.linter.name()));
             }
         }
 
