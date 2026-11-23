@@ -1,6 +1,6 @@
 [package]
 name = "rpmls"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A language server for RPM spec files"
 license = "MIT"
