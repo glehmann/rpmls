@@ -6,9 +6,12 @@
 
 mod document;
 mod lint;
+mod macros;
 mod outline;
+mod sysmacros;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
@@ -17,18 +20,41 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
 };
-use lsp_types::request::{DocumentSymbolRequest, FoldingRangeRequest, Request as _};
+use lsp_types::request::{
+    DocumentHighlightRequest, DocumentSymbolRequest, FoldingRangeRequest, GotoDefinition,
+    PrepareRenameRequest, References, Rename, Request as _,
+};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolResponse, FoldingRangeProviderCapability, OneOf, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DocumentSymbolResponse, FoldingRangeProviderCapability, GotoDefinitionResponse, OneOf,
+    RenameOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
 
 use document::Document;
 use lint::Job;
+use sysmacros::SystemMacros;
+
+const USAGE: &str = "usage: rpmls [--macro-cache DIR]
+
+  --macro-cache DIR  copy the rpm macro files go-to-definition points at
+                     to DIR, at their full path: when rpmls runs in a
+                     container, DIR is a directory shared with the host at
+                     the same path, so the editor can open them";
 
 fn main() -> Result<()> {
+    let mut macro_cache = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--macro-cache" => {
+                macro_cache = Some(PathBuf::from(args.next().ok_or_else(|| anyhow!(USAGE))?));
+            }
+            // Passed by some clients for the stdio transport, the only one.
+            "--stdio" => {}
+            _ => return Err(anyhow!(USAGE)),
+        }
+    }
     let (connection, io_threads) = Connection::stdio();
     connection.initialize(serde_json::to_value(capabilities())?)?;
 
@@ -39,7 +65,7 @@ fn main() -> Result<()> {
             let _ = sender.send(message);
         })
     });
-    let mut server = Server::new(jobs)?;
+    let mut server = Server::new(jobs, macro_cache)?;
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -70,6 +96,13 @@ fn capabilities() -> ServerCapabilities {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         ..Default::default()
     }
 }
@@ -80,13 +113,23 @@ struct Server {
     docs: HashMap<String, Document>,
     parser: Parser,
     jobs: mpsc::Sender<Job>,
+    macro_cache: Option<PathBuf>,
+    /// Loaded on the first lookup of a macro the spec does not define.
+    system_macros: Option<SystemMacros>,
 }
 
 impl Server {
-    fn new(jobs: mpsc::Sender<Job>) -> Result<Self> {
+    fn new(jobs: mpsc::Sender<Job>, macro_cache: Option<PathBuf>) -> Result<Self> {
         let mut parser = Parser::new();
         parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into())?;
-        Ok(Self { docs: HashMap::new(), parser, jobs })
+        Ok(Self { docs: HashMap::new(), parser, jobs, macro_cache, system_macros: None })
+    }
+
+    fn system_macros(&mut self) -> Result<&SystemMacros> {
+        if self.system_macros.is_none() {
+            self.system_macros = Some(SystemMacros::load(self.macro_cache.clone())?);
+        }
+        Ok(self.system_macros.as_ref().expect("just loaded"))
     }
 
     fn doc(&self, uri: &Uri) -> Result<&Document> {
@@ -138,6 +181,37 @@ impl Server {
             }
             FoldingRangeRequest::METHOD => self.respond::<FoldingRangeRequest>(request, |s, p| {
                 Ok(Some(outline::folding_ranges(s.doc(&p.text_document.uri)?)))
+            }),
+            GotoDefinition::METHOD => self.respond::<GotoDefinition>(request, |s, p| {
+                let p = p.text_document_position_params;
+                let doc = s.doc(&p.text_document.uri)?;
+                let mut locations = macros::definitions(doc, p.position);
+                // A macro the spec does not define comes from rpm's files.
+                if locations.is_empty()
+                    && let Some(name) = macros::name_at(doc, p.position)
+                {
+                    locations = s.system_macros()?.definitions(&name)?;
+                }
+                Ok(Some(GotoDefinitionResponse::Array(locations)))
+            }),
+            References::METHOD => self.respond::<References>(request, |s, p| {
+                let doc = s.doc(&p.text_document_position.text_document.uri)?;
+                let position = p.text_document_position.position;
+                Ok(Some(macros::references(doc, position, p.context.include_declaration)))
+            }),
+            DocumentHighlightRequest::METHOD => {
+                self.respond::<DocumentHighlightRequest>(request, |s, p| {
+                    let p = p.text_document_position_params;
+                    Ok(Some(macros::highlights(s.doc(&p.text_document.uri)?, p.position)))
+                })
+            }
+            PrepareRenameRequest::METHOD => self
+                .respond::<PrepareRenameRequest>(request, |s, p| {
+                    Ok(macros::prepare_rename(s.doc(&p.text_document.uri)?, p.position))
+                }),
+            Rename::METHOD => self.respond::<Rename>(request, |s, p| {
+                let p_pos = p.text_document_position;
+                macros::rename(s.doc(&p_pos.text_document.uri)?, p_pos.position, &p.new_name)
             }),
             method => Response::new_err(
                 request.id,

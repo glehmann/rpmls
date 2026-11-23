@@ -2,7 +2,7 @@
 //! LSP positions (UTF-16 code units) and byte offsets.
 
 use anyhow::{Result, anyhow};
-use lsp_types::{Position, TextDocumentContentChangeEvent, Uri};
+use lsp_types::{Position, Range, TextDocumentContentChangeEvent, Uri};
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 pub struct Document {
@@ -90,6 +90,11 @@ impl Document {
         Position::new(line as u32, character as u32)
     }
 
+    /// The LSP range of a byte range.
+    pub fn range(&self, bytes: std::ops::Range<usize>) -> Range {
+        Range::new(self.position(bytes.start), self.position(bytes.end))
+    }
+
     pub fn node_text(&self, node: Node) -> &str {
         &self.text[node.byte_range()]
     }
@@ -115,7 +120,6 @@ fn point_after(start: Point, text: &str) -> Point {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use lsp_types::Range;
 
     pub(crate) fn parser() -> Parser {
         let mut parser = Parser::new();
