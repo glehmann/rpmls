@@ -53,6 +53,10 @@ when chosen, has rpm parse the spec.
     `%files` directives;
   - the definition of a macro, from the spec, or from rpm's macro files, with
     the file it is in.
+- **Inlay hints**: the values of the spec's simple macros where they are
+  used, like `%{version} = 1.2`, when its one-line definitions and tags
+  resolve them, without running its code. Helix shows them with
+  `display-inlay-hints = true` in `[editor.lsp]`.
 - **Outline**: the sections, with the macros each defines, including those in
   conditionals.
 - **Workspace symbols**, like Helix's `space-S`: the sections, macro

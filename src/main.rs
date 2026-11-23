@@ -8,6 +8,7 @@ mod actions;
 mod checks;
 mod completion;
 mod document;
+mod hints;
 mod hover;
 mod links;
 mod lint;
@@ -31,7 +32,7 @@ use lsp_types::notification::{
 use lsp_types::request::{
     CodeActionRequest, Completion, DocumentHighlightRequest, DocumentLinkRequest,
     DocumentSymbolRequest, ExecuteCommand, FoldingRangeRequest, GotoDefinition, HoverRequest,
-    PrepareRenameRequest, References, RegisterCapability, Rename, Request as _,
+    InlayHintRequest, PrepareRenameRequest, References, RegisterCapability, Rename, Request as _,
     WorkspaceSymbolRequest,
 };
 use lsp_types::{
@@ -222,6 +223,7 @@ fn capabilities() -> ServerCapabilities {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -502,6 +504,9 @@ impl Server {
                 // Without waiting for the editor to report the change, if it does.
                 s.jobs.send(Job::Files(s.workspace.affected(path, false, &s.lint_config)))?;
                 Ok(None)
+            }),
+            InlayHintRequest::METHOD => self.respond::<InlayHintRequest>(request, |s, p| {
+                Ok(Some(hints::hints(s.doc(&p.text_document.uri)?, p.range)))
             }),
             WorkspaceSymbolRequest::METHOD => {
                 self.respond::<WorkspaceSymbolRequest>(request, |s, p| {
