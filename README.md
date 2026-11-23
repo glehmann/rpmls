@@ -68,6 +68,10 @@ when chosen, has rpm parse the spec.
   - references and highlights, of every way a macro is written: `%name`,
     `%{name}`, `%{?name}`, `%{!?name:…}`, and in conditions;
   - rename, of the macros the spec defines.
+- **Subpackage rename**: a `%package` with its `%description`, `%files`,
+  scriptlets and triggers, in their short form or with `-n`, and the
+  dependencies of the spec on it, keeping their macros, like
+  `%{name}-libs`.
 - **Packages**, across the specs of the workspace:
   - go to definition on a dependency, like `BuildRequires: foo-devel`, to the
     spec building it: its `Name`, a `%package`, or a `Provides`;

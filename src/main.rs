@@ -15,6 +15,7 @@ mod lint;
 mod macros;
 mod outline;
 mod packages;
+mod subpackages;
 mod sysmacros;
 mod workspace;
 
@@ -579,13 +580,20 @@ impl Server {
                     Ok(Some(macros::highlights(s.doc(&p.text_document.uri)?, p.position)))
                 })
             }
-            PrepareRenameRequest::METHOD => self
-                .respond::<PrepareRenameRequest>(request, |s, p| {
-                    Ok(macros::prepare_rename(s.doc(&p.text_document.uri)?, p.position))
-                }),
+            PrepareRenameRequest::METHOD => {
+                self.respond::<PrepareRenameRequest>(request, |s, p| {
+                    let doc = s.doc(&p.text_document.uri)?;
+                    Ok(macros::prepare_rename(doc, p.position)
+                        .or_else(|| subpackages::prepare_rename(doc, p.position)))
+                })
+            }
             Rename::METHOD => self.respond::<Rename>(request, |s, p| {
                 let p_pos = p.text_document_position;
-                macros::rename(s.doc(&p_pos.text_document.uri)?, p_pos.position, &p.new_name)
+                let doc = s.doc(&p_pos.text_document.uri)?;
+                match macros::prepare_rename(doc, p_pos.position) {
+                    Some(_) => macros::rename(doc, p_pos.position, &p.new_name),
+                    None => subpackages::rename(doc, p_pos.position, &p.new_name),
+                }
             }),
             method => Response::new_err(
                 request.id,
