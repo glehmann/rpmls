@@ -304,10 +304,32 @@ fn finding(rest: &str) -> Option<Finding> {
     Some(Finding { level: level.to_string(), check: check.to_string(), line, details })
 }
 
+/// The line, from 1, of a finding rpmlint gives without one, like
+/// `specfile-error`, rpm's error parsing the spec: the one rpm gives, like
+/// `line 12: Unknown tag`, or the one rpm quotes at the end, like the
+/// changelog entry, without its `*`, of `bad date in %changelog: <entry>`.
+fn quoted_line(details: &[String], lines: &[&str]) -> Option<u32> {
+    let details = details.join(" ");
+    let given = details.split("line ").skip(1).find_map(|rest| {
+        let (n, _) = rest.split_once(": ")?;
+        n.parse().ok()
+    });
+    given.or_else(|| {
+        let quoted = |l: &&str| {
+            let l = l.trim().trim_start_matches('*').trim_start();
+            !l.is_empty() && details.ends_with(&format!(": {l}"))
+        };
+        lines.iter().position(quoted).map(|i| i as u32 + 1)
+    })
+}
+
 /// A diagnostic covering the finding's whole line; a finding about the whole
 /// spec has no line and goes on the first one.
 fn diagnostic(finding: Finding, lines: &[&str], source: &str) -> Diagnostic {
-    let line = finding.line.map_or(0, |n| n.saturating_sub(1));
+    let line = finding
+        .line
+        .or_else(|| quoted_line(&finding.details, lines))
+        .map_or(0, |n| n.saturating_sub(1));
     let end = lines.get(line as usize).map_or(0, |l| l.encode_utf16().count() as u32);
     let severity = match finding.level.as_str() {
         "E" => DiagnosticSeverity::ERROR,
@@ -379,5 +401,19 @@ mod tests {
         );
         assert_eq!(f(" 0 packages and 1 specfiles checked; 0 errors"), None);
         assert_eq!(f(".rpmlintrc: E: x"), None);
+    }
+
+    #[test]
+    fn rpm_errors_are_on_their_line() {
+        let spec =
+            ["Name: foo", "Foo: bar", "%changelog", "* Web Jul 10 2026 A <a@b> - 1-1", "- x"];
+        let line =
+            |rest: &str| diagnostic(finding(rest).unwrap(), &spec, "rpmlint").range.start.line;
+        assert_eq!(line(": E: specfile-error error: line 2: Unknown tag: Foo: bar"), 1);
+        let date =
+            ": E: specfile-error error: bad date in %changelog: Web Jul 10 2026 A <a@b> - 1-1";
+        assert_eq!(line(date), 3);
+        assert_eq!(line(": E: specfile-error error: %changelog not in descending order"), 0);
+        assert_eq!(line(": W: no-%check-section"), 0);
     }
 }
