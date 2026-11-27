@@ -338,13 +338,14 @@ name = "rpmls"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "cc",
  "glob",
  "lsp-server",
  "lsp-types",
  "serde",
  "serde_json",
  "tree-sitter",
- "tree-sitter-rpmspec",
+ "tree-sitter-language",
  "url",
 ]
 
@@ -478,15 +479,6 @@ name = "tree-sitter-language"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
-
-[[package]]
-name = "tree-sitter-rpmspec"
-version = "0.0.1"
-source = "git+https://gitlab.com/gleh/tree-sitter-rpmspec.git?rev=ddf213e119feb64a00a4cb4a4d25e1eb35a1541d#ddf213e119feb64a00a4cb4a4d25e1eb35a1541d"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
 
 [[package]]
 name = "unicode-ident"

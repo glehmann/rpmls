@@ -4,6 +4,11 @@ version = "0.4.0"
 edition = "2024"
 description = "A language server for RPM spec files"
 license = "MIT"
+repository = "https://github.com/glehmann/rpmls"
+readme = "README.md"
+keywords = ["rpm", "spec", "lsp", "language-server", "rpmlint"]
+categories = ["development-tools", "text-editors"]
+include = ["/src", "/grammar", "/build.rs", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0.105"
@@ -13,5 +18,8 @@ lsp-types = "0.97.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tree-sitter = "0.27"
-tree-sitter-rpmspec = { git = "https://gitlab.com/gleh/tree-sitter-rpmspec.git", rev = "ddf213e119feb64a00a4cb4a4d25e1eb35a1541d" }
+tree-sitter-language = "0.1.9"
 url = "2.5.9"
+
+[build-dependencies]
+cc = "1.11.3"

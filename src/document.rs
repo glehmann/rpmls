@@ -127,7 +127,7 @@ pub(crate) mod tests {
 
     pub(crate) fn parser() -> Parser {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into()).unwrap();
+        parser.set_language(&crate::RPMSPEC.into()).unwrap();
         parser
     }
 

@@ -129,7 +129,7 @@ pub fn lint_loop(
     let mut pending: HashSet<String> = HashSet::new();
     let mut files: VecDeque<PathBuf> = VecDeque::new();
     let mut parser = tree_sitter::Parser::new();
-    if let Err(e) = parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into()) {
+    if let Err(e) = parser.set_language(&crate::RPMSPEC.into()) {
         eprintln!("rpmls: loading the spec grammar: {e}");
     }
     // The linter's findings, then rpmls's own.

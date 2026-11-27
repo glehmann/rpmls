@@ -46,6 +46,7 @@ use lsp_types::{
     TextDocumentSyncKind, Uri,
 };
 use tree_sitter::Parser;
+use tree_sitter_language::LanguageFn;
 
 use document::Document;
 use hover::Manual;
@@ -53,6 +54,13 @@ use lint::Job;
 use packages::Packages;
 use sysmacros::SystemMacros;
 use workspace::Workspace;
+
+unsafe extern "C" {
+    fn tree_sitter_rpmspec() -> *const ();
+}
+
+/// The rpmspec grammar, built from `grammar/`.
+const RPMSPEC: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_rpmspec) };
 
 const USAGE: &str = "usage: rpmls [--macro-cache DIR] [--spec-doc FILE]
              [--linter rpmcrab|rpmlint] [--rpmlint-config PATH]...
@@ -282,7 +290,7 @@ impl Server {
         publish: Publish,
     ) -> Result<Self> {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_rpmspec::LANGUAGE.into())?;
+        parser.set_language(&RPMSPEC.into())?;
         Ok(Self {
             docs: HashMap::new(),
             parser,

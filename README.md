@@ -154,14 +154,23 @@ name = "rpmspec"
 language-servers = ["rpmls"]
 ```
 
+## Installing
+
+```sh
+cargo install rpmls
+```
+
+Or a static binary of the [releases](https://github.com/glehmann/rpmls/releases).
+
 ## Building
 
 ```sh
 cargo build --release
 ```
 
-tree-sitter-rpmspec comes from [a fork](https://gitlab.com/gleh/tree-sitter-rpmspec/-/tree/rpmls)
-with the fixes of its grammar rpmls relies on.
+The tree-sitter-rpmspec parser is in `grammar/`, generated from
+[a fork](https://gitlab.com/gleh/tree-sitter-rpmspec/-/tree/rpmls) with the
+fixes of its grammar rpmls relies on.
 
 A static binary, to run in containers of any distribution:
 
